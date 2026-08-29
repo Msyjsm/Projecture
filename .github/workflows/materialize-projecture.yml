@@ -3,7 +3,7 @@ name: Materialize Projecture v1.1.0
 on:
   push:
     paths:
-      - '.github/workflows/materialize-projecture.yml'
+      - 'bootstrap/TRIGGER'
 
 permissions:
   contents: write
