@@ -23,6 +23,10 @@ A Tampermonkey userscript for organizing ChatGPT Projects and chats with a visua
 
 Install `Projecture.user.js` in Tampermonkey or a compatible userscript manager and visit ChatGPT. Projecture opens from the floating `▦` button or with `Alt+Shift+O`.
 
+A workplace-friendly plain-text copy is retained in `workplace-copy/Projecture.txt`.
+
+If migrating favicon rules from the former standalone custom-favicon userscript, see `tools/legacy-favicon-export-patch.txt` and then import the copied JSON from Projecture's Favicons panel.
+
 ## Version
 
 Current release: **1.1.0**.
@@ -33,7 +37,7 @@ Version snapshots are retained in `versions/` as development continues.
 
 Projecture runs entirely in the browser. It reads the signed-in ChatGPT session and uses ChatGPT's own backend endpoints to enumerate Projects/chats and perform moves. UI state and favicon configuration are stored in browser `localStorage`; the access token is retained only in memory for the current page session.
 
-See `docs/Architecture.md` and `docs/DevelopmentHistory.md`.
+See `docs/Architecture.md`, `docs/DataModel.md`, and `docs/DevelopmentHistory.md`.
 
 ## License
 
