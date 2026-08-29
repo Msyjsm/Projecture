@@ -1,0 +1,11 @@
+// Add this temporary menu command anywhere inside the standalone favicon script's IIFE,
+// after loadSettings() is defined. Run it once, copy the JSON, then use
+// Projecture -> Favicons -> Import.
+
+GM_registerMenuCommand(
+    "Export favicon config for Projecture",
+    () => {
+        const json = JSON.stringify(loadSettings(), null, 2);
+        prompt("Copy this JSON, then import it in Projecture -> Favicons -> Import:", json);
+    }
+);
