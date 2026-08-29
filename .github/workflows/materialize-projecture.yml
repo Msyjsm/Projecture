@@ -17,7 +17,7 @@ jobs:
       - name: Decode canonical source
         shell: bash
         run: |
-          base64 --decode bootstrap/Projecture.user.js.gz.b64 | gzip --decompress --stdout > Projecture.user.js
+          cat payload/p*.b64 | base64 --decode | gzip --decompress --stdout > Projecture.user.js
           echo "1f699669456e41c966dff88595b85197cd89054c4fce3c23662d2cac43ccd262  Projecture.user.js" | sha256sum --check --strict
           node --check Projecture.user.js
 
