@@ -1,0 +1,39 @@
+name: Materialize Projecture v1.1.0
+
+on:
+  push:
+    paths:
+      - '.github/workflows/materialize-projecture.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode canonical source
+        shell: bash
+        run: |
+          base64 --decode bootstrap/Projecture.user.js.gz.b64 | gzip --decompress --stdout > Projecture.user.js
+          echo "1f699669456e41c966dff88595b85197cd89054c4fce3c23662d2cac43ccd262  Projecture.user.js" | sha256sum --check --strict
+          node --check Projecture.user.js
+
+      - name: Create retained copies and license
+        shell: bash
+        run: |
+          mkdir -p versions workplace-copy
+          cp Projecture.user.js versions/Projecture-v1.1.0.user.js
+          cp Projecture.user.js workplace-copy/Projecture.txt
+          curl --fail --location --silent --show-error https://www.gnu.org/licenses/gpl-3.0.txt --output LICENSE
+
+      - name: Commit generated repository files
+        shell: bash
+        run: |
+          git config user.name "Ari (ChatGPT)"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Projecture.user.js versions/Projecture-v1.1.0.user.js workplace-copy/Projecture.txt LICENSE
+          git commit -m "Add Projecture v1.1.0 canonical source"
+          git push
