@@ -27,7 +27,7 @@ jobs:
           mkdir -p versions workplace-copy
           cp Projecture.user.js versions/Projecture-v1.1.0.user.js
           cp Projecture.user.js workplace-copy/Projecture.txt
-          curl --fail --location --silent --show-error https://www.gnu.org/licenses/gpl-3.0.txt --output LICENSE
+          cp /usr/share/common-licenses/GPL-3 LICENSE
 
       - name: Commit generated repository files
         shell: bash
