@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Projecture
 // @namespace    https://nathanburgdorff.com/userscripts/
-// @version      1.1.0
+// @version      1.1.2
 // @description  Organize ChatGPT projects and chats with drag/drop, search, bulk moves, insights, custom favicons, export, and more.
 // @author       Nathan Burgdorff + Ari (ChatGPT)
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @icon         https://chatgpt.com/favicon.ico
+// @license      GPL-3.0-or-later
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -16,7 +17,7 @@
 
     const APP = 'Projecture';
     const PREFIX = '[Projecture]';
-    const VERSION = '1.1.0';
+    const VERSION = '1.1.2';
     const STORAGE_KEY = 'projecture.settings.v1';
     const LEGACY_STORAGE_KEY = 'cgptProjectOrganizer.settings.v1';
     const FAVICON_STORAGE_KEY = 'projecture.favicons.v1';
@@ -199,7 +200,7 @@
     function normalizeProjectId(value) {
         if (!value) return null;
         const match = String(value).match(PROJECT_ID_RE);
-        return match ? match[1] : String(value);
+        return match ? match[1] : null;
     }
 
     function dateValue(value) {
@@ -455,9 +456,13 @@
     function normalizeChat(raw, forcedProjectId = undefined, archived = undefined) {
         const id = raw?.id || raw?.conversation_id;
         if (!id) return null;
+        const gizmoId = raw?.gizmo_id ? String(raw.gizmo_id) : null;
         const projectId = forcedProjectId !== undefined
             ? normalizeProjectId(forcedProjectId)
-            : normalizeProjectId(raw.gizmo_id || null);
+            : normalizeProjectId(gizmoId);
+        const origin = raw.conversation_origin || null;
+        const customGptId = !projectId && gizmoId ? gizmoId : null;
+        const customGptName = raw?.gizmo?.display?.name || raw?.gizmo?.name || raw?.gizmo_name || raw?.gpt_name || null;
         return {
             id,
             title: raw.title || raw.name || 'Untitled chat',
@@ -468,7 +473,11 @@
             archived: archived ?? raw.is_archived === true,
             starred: raw.is_starred === true,
             temporary: raw.is_temporary_chat === true,
-            origin: raw.conversation_origin || null,
+            origin,
+            gizmoId,
+            customGpt: !!customGptId || /(?:^|[_-])gizmo(?:[_-]|$)|custom.?gpt/i.test(String(origin || '')),
+            customGptId,
+            customGptName,
         };
     }
 
@@ -595,6 +604,7 @@
 
     async function setConversationProject(chatId, projectId) {
         const normalized = projectId == null ? null : normalizeProjectId(projectId);
+        if (projectId != null && !normalized) throw new Error(`Invalid Project ID: ${projectId}`);
         const res = await backendFetch(`/backend-api/conversation/${encodeURIComponent(chatId)}`, {
             method: 'PATCH',
             body: JSON.stringify({ gizmo_id: normalized }),
@@ -617,11 +627,33 @@
             return;
         }
 
-        if (actual.length > 1 && state.settings.confirmBulkMove) {
+        const customGptChats = destination
+            ? actual.map(chatById).filter(chat => chat?.customGpt)
+            : [];
+        if (customGptChats.length) {
+            const sample = customGptChats.slice(0, 5).map(chat => `• ${chat.title}`).join('\n');
+            const remainder = customGptChats.length > 5 ? `\n• …and ${customGptChats.length - 5} more` : '';
+            const noun = customGptChats.length === 1 ? 'chat was' : 'chats were';
+            const pronoun = customGptChats.length === 1 ? 'it' : 'them';
+            const message = [
+                `Warning: ${customGptChats.length} selected ${noun} created with a Custom GPT:`,
+                '',
+                sample + remainder,
+                '',
+                `ChatGPT does not support putting Custom GPT chats inside Projects. Moving ${pronoun} to “${destinationName}” will convert ${pronoun} into ${customGptChats.length === 1 ? 'a standard ChatGPT chat' : 'standard ChatGPT chats'} and discard the Custom GPT association. Projecture cannot restore that association with Undo.`,
+                '',
+                `Continue with the move${actual.length > customGptChats.length ? ` of all ${actual.length} chats` : ''}?`,
+            ].join('\n');
+            if (!confirm(message)) return;
+        } else if (actual.length > 1 && state.settings.confirmBulkMove) {
             if (!confirm(`Move ${actual.length} chats to “${destinationName}”?`)) return;
         }
 
-        const before = actual.map(id => ({ id, projectId: chatById(id)?.projectId || null }));
+        const before = actual.map(id => ({
+            id,
+            projectId: chatById(id)?.projectId || null,
+            customGptId: chatById(id)?.customGptId || null,
+        }));
         let done = 0;
         const failures = [];
         setProgress(`Moving 0/${actual.length} chats…`);
@@ -631,7 +663,15 @@
             try {
                 await setConversationProject(id, destination);
                 const chat = chatById(id);
-                if (chat) chat.projectId = destination;
+                if (chat) {
+                    chat.projectId = destination;
+                    chat.gizmoId = destination;
+                    if (destination && chat.customGpt) {
+                        chat.customGpt = false;
+                        chat.customGptId = null;
+                        chat.customGptName = null;
+                    }
+                }
                 syncFaviconIfCurrentChat(id);
                 done++;
             } catch (err) {
@@ -682,7 +722,10 @@
                 try {
                     await setConversationProject(id, target);
                     const chat = chatById(id);
-                    if (chat) chat.projectId = target;
+                    if (chat) {
+                        chat.projectId = target;
+                        chat.gizmoId = target;
+                    }
                     syncFaviconIfCurrentChat(id);
                 } catch (err) {
                     warn('Undo failed:', err);
@@ -692,7 +735,12 @@
         }
         buildIntelligence();
         setProgress('');
-        setStatus(`Undid: ${action.label}`, 'success');
+        const convertedCount = action.items.filter(item => item.customGptId).length;
+        if (convertedCount) {
+            setStatus(`Undid the Project placement. ${convertedCount} Custom GPT association${convertedCount === 1 ? '' : 's'} could not be restored.`, 'error', 9000);
+        } else {
+            setStatus(`Undid: ${action.label}`, 'success');
+        }
         render();
     }
 
@@ -1043,6 +1091,7 @@
 
     function chatUrl(chat) {
         if (chat.projectId) return `${location.origin}/g/${encodeURIComponent(chat.projectId)}/c/${encodeURIComponent(chat.id)}`;
+        if (chat.customGptId) return `${location.origin}/g/${encodeURIComponent(chat.customGptId)}/c/${encodeURIComponent(chat.id)}`;
         return `${location.origin}/c/${encodeURIComponent(chat.id)}`;
     }
 
@@ -1078,7 +1127,8 @@
             projects: state.projects.map(p => ({ id: p.id, name: p.name, description: p.description })),
             chats: state.chats.map(c => ({
                 id: c.id, title: c.title, projectId: c.projectId, createTime: c.createTime,
-                updateTime: c.updateTime, archived: c.archived, snippet: c.snippet
+                updateTime: c.updateTime, archived: c.archived, snippet: c.snippet,
+                customGpt: c.customGpt, customGptId: c.customGptId, customGptName: c.customGptName
             })),
             favicons: state.faviconSettings,
         };
@@ -1087,11 +1137,12 @@
     }
 
     function exportCsv() {
-        const rows = [['ChatId', 'Title', 'ProjectId', 'ProjectName', 'Created', 'Updated', 'Archived', 'Snippet']];
+        const rows = [['ChatId', 'Title', 'ProjectId', 'ProjectName', 'CustomGpt', 'CustomGptId', 'CustomGptName', 'Created', 'Updated', 'Archived', 'Snippet']];
         for (const c of state.chats) {
             rows.push([
                 c.id, c.title, c.projectId || '', c.projectId ? projectById(c.projectId)?.name || '' : '',
-                c.createTime || '', c.updateTime || '', String(!!c.archived), c.snippet || ''
+                String(!!c.customGpt), c.customGptId || '', c.customGptName || '', c.createTime || '',
+                c.updateTime || '', String(!!c.archived), c.snippet || ''
             ]);
         }
         const csv = rows.map(row => row.map(v => `"${String(v ?? '').replaceAll('"', '""')}"`).join(',')).join('\r\n');
@@ -1248,15 +1299,45 @@
         document.documentElement.style.overflow = '';
     }
 
+    function captureBoardScroll(app) {
+        const board = app.querySelector('.board');
+        const columns = new Map();
+        app.querySelectorAll('.drop-zone[data-drop-project]').forEach(zone => {
+            columns.set(zone.dataset.dropProject, { left: zone.scrollLeft, top: zone.scrollTop });
+        });
+        return {
+            board: board ? { left: board.scrollLeft, top: board.scrollTop } : null,
+            columns,
+        };
+    }
+
+    function restoreBoardScroll(app, scrollState) {
+        if (!scrollState) return;
+        const board = app.querySelector('.board');
+        if (board && scrollState.board) {
+            board.scrollLeft = scrollState.board.left;
+            board.scrollTop = scrollState.board.top;
+        }
+        app.querySelectorAll('.drop-zone[data-drop-project]').forEach(zone => {
+            const saved = scrollState.columns.get(zone.dataset.dropProject);
+            if (!saved) return;
+            zone.scrollLeft = saved.left;
+            zone.scrollTop = saved.top;
+        });
+    }
+
     function render() {
         if (!state.shadow || !state.open) return;
         const app = state.shadow.getElementById('app');
         if (!app) return;
 
+        const scrollState = captureBoardScroll(app);
+
         const filtered = getFilteredChats();
         const groups = groupChats(filtered);
         state.visibleChatIds = filtered.map(c => c.id);
         const selectedVisible = state.visibleChatIds.filter(id => state.selected.has(id)).length;
+        const selectedCustomGptCount = [...state.selected].filter(id => chatById(id)?.customGpt).length;
         const unassignedCount = state.chats.filter(c => !c.projectId).length;
         const suggestedCount = [...state.suggestions.keys()].filter(id => !chatById(id)?.projectId).length;
 
@@ -1308,6 +1389,7 @@
                     <button class="text-btn" data-action="select-visible">Select visible</button>
                     <button class="text-btn" data-action="invert-visible">Invert visible</button>
                     <button class="text-btn" data-action="clear-selection">Clear</button>
+                    ${selectedCustomGptCount ? `<div class="selection-warning" title="ChatGPT does not support Custom GPT chats inside Projects. Moving these chats to a Project converts them to standard ChatGPT chats.">⚠ ${selectedCustomGptCount} Custom GPT chat${selectedCustomGptCount === 1 ? '' : 's'} selected</div>` : ''}
                     <div class="spacer"></div>
                     <select id="bulkDestination" class="control small"><option value="">Move selected to…</option><option value="__unassigned__">Unassigned</option>${projectOptions}</select>
                     <button class="btn primary" data-action="bulk-move" ${state.selected.size ? '' : 'disabled'}>Move ${state.selected.size || ''}</button>
@@ -1332,6 +1414,7 @@
             </div>`;
 
         wireRenderedEvents();
+        restoreBoardScroll(app, scrollState);
     }
 
     function renderStatusHtml() {
@@ -1384,6 +1467,7 @@
         const date = state.settings.showDates ? formatDate(chat.updateTime) : '';
         const tooltip = [
             chat.title,
+            chat.customGpt ? `Custom GPT chat${chat.customGptName ? `: ${chat.customGptName}` : ''}` : '',
             chat.createTime ? `Created: ${formatDateTime(chat.createTime)}` : '',
             chat.updateTime ? `Updated: ${formatDateTime(chat.updateTime)}` : '',
             chat.archived ? 'Archived' : '',
@@ -1397,6 +1481,7 @@
                     ${state.settings.showSnippets && chat.snippet ? `<div class="snippet">${escapeHtml(chat.snippet)}</div>` : ''}
                     <div class="card-meta">
                         ${date ? `<span>${escapeHtml(date)}</span>` : ''}
+                        ${chat.customGpt ? '<span class="tag custom-gpt-tag" title="Moving this chat into a Project converts it to a standard ChatGPT chat">Custom GPT</span>' : ''}
                         ${chat.archived ? '<span class="tag">archived</span>' : ''}
                         ${chat.starred ? '<span title="Starred">★</span>' : ''}
                     </div>
@@ -1601,6 +1686,7 @@
             .icon-btn.small { width:30px;height:30px;font-size:21px; }
             .selectionbar { min-height:0; height:0; overflow:hidden; display:flex; gap:10px; align-items:center; padding:0 14px; background:color-mix(in srgb,var(--accent) 8%, var(--panel)); border-bottom:0 solid var(--line); transition:.15s ease; font-size:13px; }
             .selectionbar.active { height:48px; min-height:48px; border-bottom-width:1px; }
+            .selection-warning { color:#b56a00; font-size:11px; font-weight:700; white-space:nowrap; }
             .spacer { flex:1; }
             .text-btn { border:0; background:transparent; color:var(--muted); cursor:pointer; padding:5px 4px; }
             .text-btn:hover { color:var(--text); text-decoration:underline; }
@@ -1635,6 +1721,7 @@
             .check { flex:0 0 18px;width:18px;height:18px;border-radius:5px;border:1px solid var(--line);background:var(--panel2);color:#fff;display:grid;place-items:center;padding:0;cursor:pointer;font-size:12px;margin-top:1px; }.check.checked{background:var(--accent);border-color:var(--accent)}
             .card-main { min-width:0;flex:1; }.chat-title{font-size:12.5px;font-weight:650;text-decoration:none;line-height:1.3;display:block;overflow-wrap:anywhere}.chat-title:hover{text-decoration:underline}.snippet{font-size:10.5px;line-height:1.35;color:var(--muted);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
             .card-meta { margin-top:5px;display:flex;align-items:center;gap:6px;min-height:13px;color:var(--muted);font-size:9.5px}.tag{border:1px solid var(--line);border-radius:999px;padding:1px 5px}
+            .custom-gpt-tag { color:#8b5cf6; border-color:color-mix(in srgb,#8b5cf6 38%,var(--line)); background:color-mix(in srgb,#8b5cf6 8%,transparent); font-weight:700; }
             .suggestion { margin-top:6px;width:100%;border:0;border-radius:7px;background:color-mix(in srgb,var(--accent) 10%, transparent);color:color-mix(in srgb,var(--accent) 90%, var(--text));padding:5px 7px;text-align:left;font-size:9.5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.suggestion strong{float:right}.suggestion:hover{background:color-mix(in srgb,var(--accent) 18%, transparent)}
             .card-menu { flex:0 0 24px;width:24px;height:24px;font-size:11px;padding:0; }
             .footer { min-height:31px;border-top:1px solid var(--line);background:var(--panel);color:var(--muted);font-size:10px;padding:7px 14px;display:flex;justify-content:space-between;gap:10px; }

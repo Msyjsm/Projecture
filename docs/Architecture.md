@@ -15,7 +15,9 @@ The main normalized runtime collections are:
 
 ## Organization UI
 
-The board groups normalized chats by `projectId`. Drag/drop and bulk moves call the backend PATCH endpoint, update the corresponding in-memory chat, rebuild local intelligence, and record undo metadata.
+The board groups normalized chats by `projectId`. Drag/drop and bulk moves call the backend PATCH endpoint, update the corresponding in-memory chat, rebuild local intelligence, and record undo metadata. Re-renders snapshot and restore the board's horizontal scroll offset plus each Project column's vertical scroll offset.
+
+Custom GPT `gizmo_id` values are kept separate from `g-p-...` Project IDs. Because moving a Custom GPT conversation into a Project replaces that association, every move path passes through the same destructive-conversion confirmation.
 
 ## Local intelligence
 

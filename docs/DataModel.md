@@ -22,8 +22,12 @@ Normalized chat records include:
 - `projectId` - current normalized Project identifier or `null`.
 - `archived` / `starred` / `temporary`.
 - `origin`.
+- `gizmoId` - the source `gizmo_id`, whether it identifies a Project or a Custom GPT.
+- `customGpt` / `customGptId` / `customGptName` - Custom GPT identity metadata when present.
 
 Chat IDs are stable identities for chat-specific configuration. Moving a chat between Projects does not move or rewrite its chat-specific favicon rule.
+
+Project IDs and Custom GPT IDs are deliberately normalized into separate fields. ChatGPT does not support Custom GPT chats inside Projects: assigning one to a Project replaces its Custom GPT association. Projecture warns before that destructive conversion and does not claim that Undo can reconstruct the lost association.
 
 ## UI settings
 
