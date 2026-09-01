@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projecture
 // @namespace    https://nathanburgdorff.com/userscripts/
-// @version      1.1.0
+// @version      1.1.1
 // @description  Organize ChatGPT projects and chats with drag/drop, search, bulk moves, insights, custom favicons, export, and more.
 // @author       Nathan Burgdorff + Ari (ChatGPT)
 // @match        https://chatgpt.com/*
