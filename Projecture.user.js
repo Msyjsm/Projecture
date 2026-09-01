@@ -7,6 +7,7 @@
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @icon         https://chatgpt.com/favicon.ico
+// @license      GPL-3.0-or-later
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
