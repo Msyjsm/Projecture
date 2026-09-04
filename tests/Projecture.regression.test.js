@@ -1,15 +1,24 @@
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadProjectureInternals() {
-    const sourcePath = path.join(__dirname, '..', 'Projecture.user.js');
+function loadProjectureInternals({
+    sourcePath = path.join(__dirname, '..', 'Projecture.user.js'),
+    hash = '',
+} = {}) {
     const source = fs.readFileSync(sourcePath, 'utf8').replace(
         /\n\s*init\(\);\n\}\)\(\);\s*$/,
         `
     globalThis.__projectureTest = {
+        APP,
+        FAVICON_STORAGE_KEY,
+        IS_PREVIEW_BUILD,
+        STORAGE_KEY,
+        UserscriptBuildChannel,
         captureBoardScroll,
         moveChats,
         normalizeChat,
@@ -32,6 +41,7 @@ function loadProjectureInternals() {
         Set,
         URL,
         URLSearchParams,
+        addEventListener() {},
         clearInterval,
         clearTimeout,
         confirm(message) {
@@ -50,9 +60,11 @@ function loadProjectureInternals() {
             throw new Error('Unexpected network request in regression test.');
         },
         location: {
+            hash,
             href: 'https://chatgpt.com/',
             origin: 'https://chatgpt.com',
             pathname: '/',
+            reload() {},
         },
         localStorage: {
             getItem() { return null; },
@@ -64,9 +76,51 @@ function loadProjectureInternals() {
         structuredClone,
     };
     sandbox.globalThis = sandbox;
+    sandbox.window = sandbox;
     vm.runInNewContext(source, sandbox, { filename: sourcePath });
     return { ...sandbox.__projectureTest, confirmations };
 }
+
+test('production and generated preview builds have separate identities and storage', () => {
+    const production = loadProjectureInternals();
+    assert.equal(production.UserscriptBuildChannel, 'production');
+    assert.equal(production.IS_PREVIEW_BUILD, false);
+    assert.equal(production.APP, 'Projecture');
+    assert.equal(production.STORAGE_KEY, 'projecture.settings.v1');
+    assert.equal(production.FAVICON_STORAGE_KEY, 'projecture.favicons.v1');
+
+    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'projecture-preview-test-'));
+    try {
+        const sourcePath = path.join(temporaryDirectory, 'Projecture.user.js');
+        const outputPath = path.join(temporaryDirectory, 'Projecture.preview.user.js');
+        fs.copyFileSync(path.join(__dirname, '..', 'Projecture.user.js'), sourcePath);
+        execFileSync('python3', [
+            path.join(__dirname, '..', 'tools', 'build_preview.py'),
+            '--source', sourcePath,
+            '--output', outputPath,
+            '--preview-url', 'https://example.com/Projecture.preview.user.js',
+            '--build-number', '42',
+            '--preview-hash', '#proj-preview',
+        ]);
+        execFileSync(process.execPath, ['--check', outputPath]);
+
+        const previewSource = fs.readFileSync(outputPath, 'utf8');
+        assert.match(previewSource, /^\/\/ @name\s+Projecture \[PREVIEW\]$/m);
+        assert.match(previewSource, /^\/\/ @namespace\s+https:\/\/nathanburgdorff\.com\/userscripts\/preview\/$/m);
+        assert.match(previewSource, /^\/\/ @version\s+1\.1\.2\.42$/m);
+        assert.match(previewSource, /const UserscriptBuildChannel = "preview"; \/\/ PREVIEW_CHANNEL_MARKER/);
+        assert.match(previewSource, /const UserscriptPreviewHash = "#proj-preview";/);
+
+        const preview = loadProjectureInternals({ sourcePath: outputPath, hash: '#proj-preview' });
+        assert.equal(preview.UserscriptBuildChannel, 'preview');
+        assert.equal(preview.IS_PREVIEW_BUILD, true);
+        assert.equal(preview.APP, 'Projecture [PREVIEW]');
+        assert.equal(preview.STORAGE_KEY, 'projecture.preview.settings.v1');
+        assert.equal(preview.FAVICON_STORAGE_KEY, 'projecture.preview.favicons.v1');
+    } finally {
+        fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+});
 
 test('Project IDs and Custom GPT IDs remain distinct', () => {
     const { normalizeChat, normalizeProjectId } = loadProjectureInternals();

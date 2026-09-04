@@ -32,7 +32,17 @@ Projecture stores browser-local configuration in two keys:
 - `projecture.settings.v1`: board/UI settings.
 - `projecture.favicons.v1`: favicon master state and Project/chat rules.
 
+Generated Preview builds use `projecture.preview.settings.v1` and `projecture.preview.favicons.v1`. This explicit suffix is required because Projecture uses page `localStorage`; Tampermonkey's separate Preview namespace alone does not isolate page storage.
+
 Legacy Organizer settings are read from `cgptProjectOrganizer.settings.v1` when no current Projecture settings exist. Legacy data is copied forward rather than deleted automatically.
+
+## Preview channel
+
+The canonical userscript contains a production build marker and a hash router. Production runs on normal ChatGPT URLs; the separately generated Preview copy runs only when the URL hash is exactly `#proj-preview`. Changing that selector reloads the page so only one installed copy initializes.
+
+`.github/workflows/preview-channel.yml` runs `tools/build_preview.py` after source-branch pushes. The builder gives Preview a separate userscript name and namespace, appends the workflow run number to its version, injects fixed preview-branch update URLs, flips the build marker, and publishes only the generated script plus source provenance to the `preview` branch.
+
+This isolates the installed scripts and browser-local configuration, but it does not sandbox ChatGPT backend mutations. Preview chat moves affect the live account.
 
 ## Favicon engine
 

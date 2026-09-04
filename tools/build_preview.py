@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a separately-installable Tampermonkey preview copy of a userscript.
+"""Build a separately installable Tampermonkey preview copy of a userscript.
 
 The production source remains the canonical file. This tool rewrites only the
 preview build's metadata. When --preview-hash is supplied, it also ensures the
@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preview-hash",
         default=None,
-        help="Optional hash fragment, e.g. #lbc-preview, used to route preview traffic.",
+        help="Optional hash fragment, e.g. #proj-preview, used to route preview traffic.",
     )
     return parser.parse_args()
 

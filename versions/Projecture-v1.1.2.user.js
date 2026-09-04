@@ -15,13 +15,40 @@
 (() => {
     'use strict';
 
-    const APP = 'Projecture';
-    const PREFIX = '[Projecture]';
+    // PREVIEW_CHANNEL_ROUTING
+    // Tampermonkey's URL matcher ignores hash fragments, so both installed
+    // copies match the page. This runtime gate makes exactly one copy active
+    // and reloads when the preview hash is toggled.
+    const UserscriptBuildChannel = "production"; // PREVIEW_CHANNEL_MARKER
+    const UserscriptPreviewHash = "#proj-preview";
+    const UserscriptPreviewRequested =
+        location.hash.toLowerCase() === UserscriptPreviewHash;
+
+    window.addEventListener("hashchange", () => {
+        const PreviewRequestedNow =
+            location.hash.toLowerCase() === UserscriptPreviewHash;
+
+        if (PreviewRequestedNow !== UserscriptPreviewRequested) {
+            location.reload();
+        }
+    });
+
+    if (
+        (UserscriptBuildChannel === "preview") !==
+        UserscriptPreviewRequested
+    ) {
+        return;
+    }
+
+    const IS_PREVIEW_BUILD = UserscriptBuildChannel === 'preview';
+    const APP = IS_PREVIEW_BUILD ? 'Projecture [PREVIEW]' : 'Projecture';
+    const PREFIX = IS_PREVIEW_BUILD ? '[Projecture Preview]' : '[Projecture]';
     const VERSION = '1.1.2';
-    const STORAGE_KEY = 'projecture.settings.v1';
-    const LEGACY_STORAGE_KEY = 'cgptProjectOrganizer.settings.v1';
-    const FAVICON_STORAGE_KEY = 'projecture.favicons.v1';
-    const LEGACY_FAVICON_LOCAL_STORAGE_KEY = 'ChatGPTCustomFavicons';
+    const STORAGE_PREFIX = IS_PREVIEW_BUILD ? 'projecture.preview' : 'projecture';
+    const STORAGE_KEY = `${STORAGE_PREFIX}.settings.v1`;
+    const LEGACY_STORAGE_KEY = IS_PREVIEW_BUILD ? null : 'cgptProjectOrganizer.settings.v1';
+    const FAVICON_STORAGE_KEY = `${STORAGE_PREFIX}.favicons.v1`;
+    const LEGACY_FAVICON_LOCAL_STORAGE_KEY = IS_PREVIEW_BUILD ? null : 'ChatGPTCustomFavicons';
     const BUTTON_ID = 'projecture-launcher';
     const ROOT_ID = 'projecture-root';
     const PROJECT_ID_RE = /^(g-p-[0-9a-f]{32})(?:-|$)/i;
@@ -111,7 +138,7 @@
     function loadSettings() {
         try {
             const current = localStorage.getItem(STORAGE_KEY);
-            const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+            const legacy = LEGACY_STORAGE_KEY ? localStorage.getItem(LEGACY_STORAGE_KEY) : null;
             const rawText = current || legacy || '{}';
             const raw = JSON.parse(rawText);
             const settings = deepMerge(structuredClone(DEFAULT_SETTINGS), raw);
@@ -155,7 +182,9 @@
     function loadFaviconSettings() {
         try {
             const current = localStorage.getItem(FAVICON_STORAGE_KEY);
-            const legacy = localStorage.getItem(LEGACY_FAVICON_LOCAL_STORAGE_KEY);
+            const legacy = LEGACY_FAVICON_LOCAL_STORAGE_KEY
+                ? localStorage.getItem(LEGACY_FAVICON_LOCAL_STORAGE_KEY)
+                : null;
             const settings = normalizeFaviconSettings(JSON.parse(current || legacy || '{}'));
             if (!current && legacy) localStorage.setItem(FAVICON_STORAGE_KEY, JSON.stringify(settings));
             return settings;
@@ -1349,7 +1378,7 @@
                 <header class="topbar">
                     <div class="brand">
                         <div class="brand-icon">▦</div>
-                        <div><div class="brand-title">Projecture</div><div class="brand-sub">${state.chats.length.toLocaleString()} chats · ${state.projects.length.toLocaleString()} Projects · ${unassignedCount.toLocaleString()} unassigned</div></div>
+                        <div><div class="brand-title">${escapeHtml(APP)}</div><div class="brand-sub">${state.chats.length.toLocaleString()} chats · ${state.projects.length.toLocaleString()} Projects · ${unassignedCount.toLocaleString()} unassigned</div></div>
                     </div>
                     <div class="top-actions">
                         <button class="btn ghost" data-action="refresh" ${state.loading ? 'disabled' : ''}>↻ Refresh</button>

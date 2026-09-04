@@ -39,16 +39,17 @@ jobs:
             --source "$SCRIPT_FILE" \
             --output "$RUNNER_TEMP/$PREVIEW_FILE" \
             --preview-url "$PREVIEW_RAW_URL" \
-            --build-number "${{ github.run_number }}"
+            --build-number "${{ github.run_number }}" \
+            --preview-hash "#proj-preview"
 
           node --check "$SCRIPT_FILE"
           node --check "$RUNNER_TEMP/$PREVIEW_FILE"
 
-      - name: Commit any source normalization
+      - name: Commit hash-channel router if first needed
         run: |
           if ! git diff --quiet -- "$SCRIPT_FILE"; then
             git add "$SCRIPT_FILE"
-            git commit -m "Normalize userscript preview routing"
+            git commit -m "Add Projecture preview URL channel routing"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
@@ -63,6 +64,7 @@ jobs:
           Source branch: ${SOURCE_BRANCH}
           Source commit: ${SOURCE_SHA}
           Workflow run: ${GITHUB_RUN_ID}
+          Preview selector: #proj-preview
           EOF
 
           if git ls-remote --exit-code --heads origin preview >/dev/null 2>&1; then
