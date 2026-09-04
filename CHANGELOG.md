@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.3 - 2026-09-04
+
+- Moved Favicons and Insights beside the Projecture title, with Favicons first.
+- Moved Settings into the top-right header between Undo and Close.
+- Reordered the filter toolbar so Search fills its remaining width after the view, Project, and sort controls.
+- Integrated the selection count, selection commands, destination, and Move button into the toolbar after Search.
+- Removed the expanding selection row so the board no longer shifts downward when the first chat is selected.
+
+## 1.1.2 - 2026-09-01
+
+- Added an automated, separately installable Preview build for side-by-side pull-request testing.
+- Routed normal URLs to Production and URLs ending in `#proj-preview` to Preview, with automatic reload when the hash changes.
+- Isolated Preview UI and favicon settings from Production local storage.
+- Preserved the board's horizontal scroll position and every Project column's vertical scroll position across selection-driven re-renders.
+- Separated ChatGPT Project IDs from Custom GPT IDs in normalized chat data.
+- Added a visible `Custom GPT` badge to affected chat cards and a selection-bar warning when any are selected.
+- Added an unavoidable confirmation before a move would convert Custom GPT chats into standard ChatGPT chats.
+- Clarified after Undo that Projecture can restore Project placement but cannot restore a discarded Custom GPT association.
+- Included Custom GPT metadata in JSON and CSV organization exports.
+- Added regression coverage for preview generation/routing, storage isolation, scroll preservation, ID classification, and destructive-move confirmation.
+
 ## 1.1.0 - 2026-08-28
 
 - Canonicalized the project name from ChatGPT Project Organizer to **Projecture**.

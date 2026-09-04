@@ -1,0 +1,85 @@
+name: Build userscript preview
+
+on:
+  push:
+    branches-ignore:
+      - preview
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: userscript-preview-${{ github.repository }}
+  cancel-in-progress: true
+
+env:
+  SCRIPT_FILE: Projecture.user.js
+  PREVIEW_FILE: Projecture.preview.user.js
+  PREVIEW_RAW_URL: https://raw.githubusercontent.com/${{ github.repository }}/preview/Projecture.preview.user.js
+
+jobs:
+  build-preview:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Build preview userscript
+        run: |
+          python tools/build_preview.py \
+            --source "$SCRIPT_FILE" \
+            --output "$RUNNER_TEMP/$PREVIEW_FILE" \
+            --preview-url "$PREVIEW_RAW_URL" \
+            --build-number "${{ github.run_number }}" \
+            --preview-hash "#proj-preview"
+
+          node --check "$SCRIPT_FILE"
+          node --check "$RUNNER_TEMP/$PREVIEW_FILE"
+
+      - name: Commit hash-channel router if first needed
+        run: |
+          if ! git diff --quiet -- "$SCRIPT_FILE"; then
+            git add "$SCRIPT_FILE"
+            git commit -m "Add Projecture preview URL channel routing"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Publish fixed preview branch
+        env:
+          SOURCE_BRANCH: ${{ github.ref_name }}
+        run: |
+          SOURCE_SHA="$(git rev-parse HEAD)"
+
+          cat > "$RUNNER_TEMP/PREVIEW_SOURCE.txt" <<EOF
+          Generated userscript preview. Do not edit this branch directly.
+          Source branch: ${SOURCE_BRANCH}
+          Source commit: ${SOURCE_SHA}
+          Workflow run: ${GITHUB_RUN_ID}
+          Preview selector: #proj-preview
+          EOF
+
+          if git ls-remote --exit-code --heads origin preview >/dev/null 2>&1; then
+            git fetch origin preview:refs/heads/preview
+            git switch preview
+          else
+            git switch --orphan preview
+          fi
+
+          git rm -rf . >/dev/null 2>&1 || true
+          git clean -fdx >/dev/null 2>&1 || true
+
+          cp "$RUNNER_TEMP/$PREVIEW_FILE" "$PREVIEW_FILE"
+          cp "$RUNNER_TEMP/PREVIEW_SOURCE.txt" PREVIEW_SOURCE.txt
+
+          git add "$PREVIEW_FILE" PREVIEW_SOURCE.txt
+          git commit -m "Build preview from ${SOURCE_BRANCH} (${SOURCE_SHA:0:7})"
+          git push origin preview
