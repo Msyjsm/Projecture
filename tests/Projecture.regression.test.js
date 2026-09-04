@@ -107,7 +107,7 @@ test('production and generated preview builds have separate identities and stora
         const previewSource = fs.readFileSync(outputPath, 'utf8');
         assert.match(previewSource, /^\/\/ @name\s+Projecture \[PREVIEW\]$/m);
         assert.match(previewSource, /^\/\/ @namespace\s+https:\/\/nathanburgdorff\.com\/userscripts\/preview\/$/m);
-        assert.match(previewSource, /^\/\/ @version\s+1\.1\.2\.42$/m);
+        assert.match(previewSource, /^\/\/ @version\s+1\.1\.3\.42$/m);
         assert.match(previewSource, /const UserscriptBuildChannel = "preview"; \/\/ PREVIEW_CHANNEL_MARKER/);
         assert.match(previewSource, /const UserscriptPreviewHash = "#proj-preview";/);
 
@@ -120,6 +120,24 @@ test('production and generated preview builds have separate identities and stora
     } finally {
         fs.rmSync(temporaryDirectory, { recursive: true, force: true });
     }
+});
+
+test('selection controls share the toolbar without adding a board-shifting row', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'Projecture.user.js'), 'utf8');
+    const toolbarStart = source.indexOf('<section class="toolbar">');
+    const toolbarEnd = source.indexOf('</section>', toolbarStart);
+    const toolbar = source.slice(toolbarStart, toolbarEnd);
+    const headerStart = source.indexOf('<header class="topbar">');
+    const headerEnd = source.indexOf('</header>', headerStart);
+    const header = source.slice(headerStart, headerEnd);
+
+    assert.ok(toolbarStart >= 0 && toolbarEnd > toolbarStart);
+    assert.ok(toolbar.indexOf('id="sortSelect"') < toolbar.indexOf('class="search-wrap"'));
+    assert.ok(toolbar.indexOf('class="search-wrap"') < toolbar.indexOf('class="selection-controls"'));
+    assert.doesNotMatch(source, /class="selectionbar/);
+    assert.ok(header.indexOf('toggle-favicons') < header.indexOf('toggle-insights'));
+    assert.ok(header.indexOf('data-action="undo"') < header.indexOf('toggle-settings'));
+    assert.ok(header.indexOf('toggle-settings') < header.indexOf('data-action="close"'));
 });
 
 test('Project IDs and Custom GPT IDs remain distinct', () => {

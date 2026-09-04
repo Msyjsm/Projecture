@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projecture
 // @namespace    https://nathanburgdorff.com/userscripts/
-// @version      1.1.2
+// @version      1.1.3
 // @description  Organize ChatGPT projects and chats with drag/drop, search, bulk moves, insights, custom favicons, export, and more.
 // @author       Nathan Burgdorff + Ari (ChatGPT)
 // @match        https://chatgpt.com/*
@@ -43,7 +43,7 @@
     const IS_PREVIEW_BUILD = UserscriptBuildChannel === 'preview';
     const APP = IS_PREVIEW_BUILD ? 'Projecture [PREVIEW]' : 'Projecture';
     const PREFIX = IS_PREVIEW_BUILD ? '[Projecture Preview]' : '[Projecture]';
-    const VERSION = '1.1.2';
+    const VERSION = '1.1.3';
     const STORAGE_PREFIX = IS_PREVIEW_BUILD ? 'projecture.preview' : 'projecture';
     const STORAGE_KEY = `${STORAGE_PREFIX}.settings.v1`;
     const LEGACY_STORAGE_KEY = IS_PREVIEW_BUILD ? null : 'cgptProjectOrganizer.settings.v1';
@@ -1376,19 +1376,25 @@
         app.innerHTML = `
             <div class="overlay-shell ${state.settings.compact ? 'compact' : ''}">
                 <header class="topbar">
-                    <div class="brand">
-                        <div class="brand-icon">▦</div>
-                        <div><div class="brand-title">${escapeHtml(APP)}</div><div class="brand-sub">${state.chats.length.toLocaleString()} chats · ${state.projects.length.toLocaleString()} Projects · ${unassignedCount.toLocaleString()} unassigned</div></div>
+                    <div class="topbar-left">
+                        <div class="brand">
+                            <div class="brand-icon">▦</div>
+                            <div><div class="brand-title">${escapeHtml(APP)}</div><div class="brand-sub">${state.chats.length.toLocaleString()} chats · ${state.projects.length.toLocaleString()} Projects · ${unassignedCount.toLocaleString()} unassigned</div></div>
+                        </div>
+                        <div class="brand-actions">
+                            <button class="btn ghost" data-action="toggle-favicons">🎨 Favicons</button>
+                            <button class="btn ghost" data-action="toggle-insights">✦ Insights</button>
+                        </div>
                     </div>
                     <div class="top-actions">
                         <button class="btn ghost" data-action="refresh" ${state.loading ? 'disabled' : ''}>↻ Refresh</button>
                         <button class="btn ghost" data-action="undo" ${state.undoStack.length ? '' : 'disabled'}>↶ Undo${state.undoStack.length ? ` (${state.undoStack.length})` : ''}</button>
+                        <button class="icon-btn header-gear" data-action="toggle-settings" title="Settings">⚙</button>
                         <button class="icon-btn" data-action="close" title="Close (Esc)">×</button>
                     </div>
                 </header>
 
                 <section class="toolbar">
-                    <div class="search-wrap"><span>⌕</span><input id="search" type="search" placeholder="Search chats, snippets, or Project names…" value="${escapeHtml(state.search)}"></div>
                     <select id="viewSelect" class="control" title="View">
                         <option value="all" ${state.settings.view === 'all' ? 'selected' : ''}>All chats</option>
                         <option value="unassigned" ${state.settings.view === 'unassigned' ? 'selected' : ''}>Unassigned only (${unassignedCount})</option>
@@ -1408,26 +1414,25 @@
                         <option value="title-asc" ${state.settings.sort === 'title-asc' ? 'selected' : ''}>Title A→Z</option>
                         <option value="title-desc" ${state.settings.sort === 'title-desc' ? 'selected' : ''}>Title Z→A</option>
                     </select>
-                    <button class="btn ghost" data-action="toggle-insights">✦ Insights</button>
-                    <button class="btn ghost" data-action="toggle-favicons">🎨 Favicons</button>
-                    <button class="btn ghost" data-action="toggle-settings">⚙</button>
-                </section>
-
-                <section class="selectionbar ${state.selected.size ? 'active' : ''}">
-                    <div><strong>${state.selected.size.toLocaleString()}</strong> selected${selectedVisible !== state.selected.size ? ` · ${selectedVisible} visible` : ''}</div>
-                    <button class="text-btn" data-action="select-visible">Select visible</button>
-                    <button class="text-btn" data-action="invert-visible">Invert visible</button>
-                    <button class="text-btn" data-action="clear-selection">Clear</button>
-                    ${selectedCustomGptCount ? `<div class="selection-warning" title="ChatGPT does not support Custom GPT chats inside Projects. Moving these chats to a Project converts them to standard ChatGPT chats.">⚠ ${selectedCustomGptCount} Custom GPT chat${selectedCustomGptCount === 1 ? '' : 's'} selected</div>` : ''}
-                    <div class="spacer"></div>
-                    <select id="bulkDestination" class="control small"><option value="">Move selected to…</option><option value="__unassigned__">Unassigned</option>${projectOptions}</select>
-                    <button class="btn primary" data-action="bulk-move" ${state.selected.size ? '' : 'disabled'}>Move ${state.selected.size || ''}</button>
+                    <div class="search-wrap"><span>⌕</span><input id="search" type="search" placeholder="Search chats, snippets, or Project names…" value="${escapeHtml(state.search)}"></div>
+                    ${state.selected.size ? `
+                        <div class="selection-controls">
+                            <div class="selection-count"><strong>${state.selected.size.toLocaleString()}</strong> selected${selectedVisible !== state.selected.size ? ` · ${selectedVisible} visible` : ''}</div>
+                            <button class="text-btn" data-action="select-visible">Select visible</button>
+                            <button class="text-btn" data-action="invert-visible">Invert visible</button>
+                            <button class="text-btn" data-action="clear-selection">Clear</button>
+                            ${selectedCustomGptCount ? `<div class="selection-warning" title="ChatGPT does not support Custom GPT chats inside Projects. Moving these chats to a Project converts them to standard ChatGPT chats.">⚠ ${selectedCustomGptCount} Custom GPT</div>` : ''}
+                            <select id="bulkDestination" class="control small"><option value="">Move selected to…</option><option value="__unassigned__">Unassigned</option>${projectOptions}</select>
+                            <button class="btn primary" data-action="bulk-move">Move ${state.selected.size}</button>
+                        </div>` : ''}
                 </section>
 
                 <div id="statusArea" class="status-area">${renderStatusHtml()}</div>
-                <div id="insightsPanel" class="drawer hidden">${renderInsightsHtml()}</div>
-                <div id="faviconsPanel" class="drawer hidden">${renderFaviconsHtml()}</div>
-                <div id="settingsPanel" class="drawer hidden">${renderSettingsHtml()}</div>
+                <div class="drawer-stack">
+                    <div id="insightsPanel" class="drawer hidden">${renderInsightsHtml()}</div>
+                    <div id="faviconsPanel" class="drawer hidden">${renderFaviconsHtml()}</div>
+                    <div id="settingsPanel" class="drawer hidden">${renderSettingsHtml()}</div>
+                </div>
 
                 <main class="board" style="--column-width:${Number(state.settings.columnWidth) || 330}px">
                     ${renderColumn(null, 'Unassigned', groups.get('__unassigned__') || [], '#8b8b8b', unassignedCount, true)}
@@ -1693,15 +1698,16 @@
             button,input,select { font:inherit; }
             button { color:inherit; }
             a { color:inherit; }
-            .overlay-shell { position:fixed; inset:0; display:grid; grid-template-rows:auto auto auto auto 1fr auto; background:var(--bg); color:var(--text); }
+            .overlay-shell { position:fixed; inset:0; display:grid; grid-template-rows:auto auto auto minmax(0,1fr) auto; background:var(--bg); color:var(--text); }
             .topbar { min-height:66px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:10px 18px; border-bottom:1px solid var(--line); background:color-mix(in srgb,var(--panel) 94%, transparent); }
+            .topbar-left { min-width:0; display:flex; align-items:center; gap:14px; }
             .brand { display:flex; align-items:center; gap:11px; min-width:0; }
             .brand-icon { width:38px; height:38px; border-radius:11px; display:grid; place-items:center; background:var(--text); color:var(--panel); font-size:21px; font-weight:700; }
             .brand-title { font-size:16px; font-weight:750; letter-spacing:-.015em; }
             .brand-sub { font-size:12px; color:var(--muted); margin-top:2px; }
-            .top-actions,.action-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-            .toolbar { display:flex; gap:8px; align-items:center; padding:9px 14px; background:var(--panel); border-bottom:1px solid var(--line); }
-            .search-wrap { min-width:280px; max-width:620px; flex:1; display:flex; align-items:center; gap:7px; background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:0 10px; }
+            .brand-actions,.top-actions,.action-row { display:flex; align-items:center; gap:8px; flex-wrap:nowrap; }
+            .toolbar { min-width:0; display:flex; flex-wrap:nowrap; gap:8px; align-items:center; padding:9px 14px; overflow-x:auto; overflow-y:hidden; background:var(--panel); border-bottom:1px solid var(--line); scrollbar-width:thin; }
+            .search-wrap { min-width:120px; flex:1 1 620px; display:flex; align-items:center; gap:7px; background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:0 10px; }
             .search-wrap input { width:100%; min-width:0; border:0; outline:0; background:transparent; color:var(--text); height:36px; }
             .control { height:36px; border:1px solid var(--line); background:var(--panel2); color:var(--text); border-radius:9px; padding:0 9px; outline:none; max-width:210px; }
             .control.small { height:32px; max-width:250px; }
@@ -1713,16 +1719,17 @@
             .icon-btn { width:38px; height:38px; border:0; border-radius:10px; background:transparent; cursor:pointer; font-size:28px; line-height:1; }
             .icon-btn:hover { background:var(--panel2); }
             .icon-btn.small { width:30px;height:30px;font-size:21px; }
-            .selectionbar { min-height:0; height:0; overflow:hidden; display:flex; gap:10px; align-items:center; padding:0 14px; background:color-mix(in srgb,var(--accent) 8%, var(--panel)); border-bottom:0 solid var(--line); transition:.15s ease; font-size:13px; }
-            .selectionbar.active { height:48px; min-height:48px; border-bottom-width:1px; }
+            .header-gear { font-size:19px; }
+            .selection-controls { flex:0 0 auto; height:36px; display:flex; gap:7px; align-items:center; padding:2px 4px 2px 9px; border:1px solid color-mix(in srgb,var(--accent) 22%,var(--line)); border-radius:10px; background:color-mix(in srgb,var(--accent) 8%,var(--panel)); font-size:12px; white-space:nowrap; }
+            .selection-count { color:var(--text); }
             .selection-warning { color:#b56a00; font-size:11px; font-weight:700; white-space:nowrap; }
-            .spacer { flex:1; }
             .text-btn { border:0; background:transparent; color:var(--muted); cursor:pointer; padding:5px 4px; }
             .text-btn:hover { color:var(--text); text-decoration:underline; }
             .status-area { position:fixed; z-index:10; left:50%; transform:translateX(-50%); top:72px; pointer-events:none; display:flex; flex-direction:column; align-items:center; gap:6px; max-width:min(720px,90vw); }
             .progress-pill,.toast { background:var(--text); color:var(--panel); border-radius:999px; padding:8px 13px; box-shadow:var(--shadow); font-size:12px; display:flex; align-items:center; gap:8px; }
             .toast.error { background:#a92f2f;color:#fff; }.toast.success { background:#137a5f;color:#fff; }.toast.info { background:#333;color:#fff; }
             .spinner { width:12px;height:12px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:spin .7s linear infinite; } @keyframes spin{to{transform:rotate(360deg)}}
+            .drawer-stack { min-height:0; }
             .drawer { margin:0 14px; padding:14px; border:1px solid var(--line); border-top:0; background:var(--panel); box-shadow:0 10px 28px rgba(0,0,0,.08); max-height:36vh; overflow:auto; }
             .drawer.hidden { display:none; }
             .drawer-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:12px; }
@@ -1757,7 +1764,7 @@
             .compact .chat-card{padding:6px 6px;margin-bottom:5px}.compact .snippet{display:none}.compact .card-meta{margin-top:2px}.compact .suggestion{margin-top:4px;padding:3px 6px}.compact .drop-zone{padding:6px}
             .popover { position:fixed;z-index:50;min-width:220px;max-width:320px;background:var(--panel);border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow);padding:6px; }.popover button{width:100%;border:0;background:transparent;text-align:left;padding:8px 9px;border-radius:7px;cursor:pointer;font-size:12px}.popover button:hover{background:var(--panel2)}.popover .pop-title{font-size:10px;color:var(--muted);padding:5px 9px}.popover .sep{height:1px;background:var(--line);margin:5px 0}
             .favicon-toolbar { display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px; }.favicon-master{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:650}.favicon-master input{accent-color:var(--accent)}.favicon-search{min-width:220px;max-width:360px;flex:1}.favicon-table{border:1px solid var(--line);border-radius:10px;overflow:auto;max-height:25vh;background:var(--panel2)}.favicon-row{display:grid;grid-template-columns:42px 54px 70px minmax(210px,1.4fr) minmax(150px,1fr) minmax(180px,1fr) 112px;gap:8px;align-items:center;padding:7px 9px;border-bottom:1px solid var(--line);font-size:11px;min-width:930px}.favicon-row:last-child{border-bottom:0}.favicon-head{position:sticky;top:0;z-index:1;background:var(--panel);font-weight:700;color:var(--muted);font-size:10px}.favicon-preview{width:30px;height:30px;border-radius:7px;border:1px solid var(--line);background:var(--panel);display:grid;place-items:center;overflow:hidden;font-size:21px}.favicon-preview img{width:100%;height:100%;object-fit:contain}.favicon-kind{color:var(--muted)}.favicon-name{min-width:0;display:flex;flex-direction:column;gap:2px}.favicon-name strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favicon-project,.favicon-relation{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favicon-actions{display:flex;align-items:center;justify-content:flex-end;gap:5px}.danger-text{color:#d34c4c}.favicon-empty{padding:18px}.favicon-note{margin-top:8px}
-            @media (max-width:900px){.toolbar{flex-wrap:wrap}.search-wrap{min-width:100%;order:-1}.settings-grid{grid-template-columns:1fr 1fr}.insight-grid{grid-template-columns:1fr 1fr}.brand-sub{display:none}}
+            @media (max-width:900px){.settings-grid{grid-template-columns:1fr 1fr}.insight-grid{grid-template-columns:1fr 1fr}.brand-sub{display:none}.brand-actions .btn{padding:0 8px}.top-actions{gap:3px}}
         `;
     }
 

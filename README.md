@@ -44,7 +44,7 @@ Refreshing ChatGPT only reloads the userscript version already installed in the 
 
 ## Version
 
-Current release: **1.1.2**.
+Current release: **1.1.3**.
 
 Version snapshots are retained in `versions/` as development continues.
 
