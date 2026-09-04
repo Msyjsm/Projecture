@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Projecture [PREVIEW]
 // @namespace    https://nathanburgdorff.com/userscripts/preview/
-// @version      1.1.3.3
+// @version      1.1.3.4
 // @description  Organize ChatGPT projects and chats with drag/drop, search, bulk moves, insights, custom favicons, export, and more.
 // @author       Nathan Burgdorff + Ari (ChatGPT)
 // @match        https://chatgpt.com/*
@@ -46,7 +46,7 @@
     const IS_PREVIEW_BUILD = UserscriptBuildChannel === 'preview';
     const APP = IS_PREVIEW_BUILD ? 'Projecture [PREVIEW]' : 'Projecture';
     const PREFIX = IS_PREVIEW_BUILD ? '[Projecture Preview]' : '[Projecture]';
-    const VERSION = '1.1.3.3';
+    const VERSION = '1.1.3.4';
     const STORAGE_PREFIX = IS_PREVIEW_BUILD ? 'projecture.preview' : 'projecture';
     const STORAGE_KEY = `${STORAGE_PREFIX}.settings.v1`;
     const LEGACY_STORAGE_KEY = IS_PREVIEW_BUILD ? null : 'cgptProjectOrganizer.settings.v1';
