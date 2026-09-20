@@ -1,6 +1,6 @@
 # Data Model
 
-Projecture has two layers of state: live ChatGPT data held in memory and browser-local Projecture configuration.
+Projecture has three layers of state: live ChatGPT data held in memory, browser-local configuration, and an optional timestamped portable representation used for Drive synchronization.
 
 ## Projects
 
@@ -35,6 +35,8 @@ Stored under `projecture.settings.v1`.
 
 Examples include sort/view choices, compact mode, snippet/date visibility, archived-chat inclusion, collapsed/hidden Projects, organizer colors, and column width.
 
+Column width is intentionally absent from portable/cloud state. Other durable settings are represented as independent timestamped records so unrelated changes made on different browsers can converge.
+
 ## Favicon settings
 
 Stored under `projecture.favicons.v1`:
@@ -59,9 +61,26 @@ Resolution order is:
 
 A disabled chat-specific rule remains stored but does not block inheritance from an enabled Project rule.
 
+## Saved multi-chats
+
+Stored under `projecture.multichats.v1`. Each active view contains:
+
+- `id` and `name`.
+- ordered `chatIds` (two to four entries).
+- `scrollPositions` keyed by chat ID.
+- `createdAt` and `updatedAt`.
+
+Cloud portable state wraps each view in a timestamped record. Deletion produces a tombstone instead of removing the record immediately.
+
+## Portable state
+
+`projecture.portable.v1` uses format `ProjecturePortableState`, schema version 1. It contains timestamped scalar settings, timestamped map entries, favicon rules, and saved multi-chat records. A record with `deleted: true` and a newer timestamp wins over an older live value. Exact-timestamp ties use a deterministic serialized comparison so clients converge.
+
 ## Migration principles
 
 - Prefer current Projecture storage when both current and legacy keys exist.
 - Copy compatible legacy data forward rather than deleting it automatically.
 - Normalize older favicon string values into `{ value, enabled }` objects.
 - Treat missing historical `enabled` values as enabled for backward compatibility.
+- Seed timestamped portable records from existing local settings/favicons on first v1.2 load.
+- Retain deletion tombstones through sync rather than interpreting absence as deletion.

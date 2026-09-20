@@ -16,6 +16,7 @@ concurrency:
 env:
   SCRIPT_FILE: Projecture.user.js
   PREVIEW_FILE: Projecture.preview.user.js
+  PREVIEW_TEXT_FILE: Projecture.preview.txt
   PREVIEW_RAW_URL: https://raw.githubusercontent.com/${{ github.repository }}/preview/Projecture.preview.user.js
 
 jobs:
@@ -42,8 +43,12 @@ jobs:
             --build-number "${{ github.run_number }}" \
             --preview-hash "#proj-preview"
 
+          cp "$RUNNER_TEMP/$PREVIEW_FILE" "$RUNNER_TEMP/$PREVIEW_TEXT_FILE"
+
           node --check "$SCRIPT_FILE"
           node --check "$RUNNER_TEMP/$PREVIEW_FILE"
+          node --check < integrations/google-drive/Code.gs
+          node --test tests/Projecture.regression.test.js
 
       - name: Commit hash-channel router if first needed
         run: |
@@ -78,8 +83,9 @@ jobs:
           git clean -fdx >/dev/null 2>&1 || true
 
           cp "$RUNNER_TEMP/$PREVIEW_FILE" "$PREVIEW_FILE"
+          cp "$RUNNER_TEMP/$PREVIEW_TEXT_FILE" "$PREVIEW_TEXT_FILE"
           cp "$RUNNER_TEMP/PREVIEW_SOURCE.txt" PREVIEW_SOURCE.txt
 
-          git add "$PREVIEW_FILE" PREVIEW_SOURCE.txt
+          git add "$PREVIEW_FILE" "$PREVIEW_TEXT_FILE" PREVIEW_SOURCE.txt
           git commit -m "Build preview from ${SOURCE_BRANCH} (${SOURCE_SHA:0:7})"
           git push origin preview

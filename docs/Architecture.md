@@ -19,6 +19,12 @@ The board groups normalized chats by `projectId`. Drag/drop and bulk moves call 
 
 Custom GPT `gizmo_id` values are kept separate from `g-p-...` Project IDs. Because moving a Custom GPT conversation into a Project replaces that association, every move path passes through the same destructive-conversion confirmation.
 
+## Multi-chat Compare View
+
+Compare View fetches each selected conversation from ChatGPT's conversation endpoint and follows the parent chain from `current_node`, which selects the active branch rather than rendering abandoned regenerated branches. The normalized view is deliberately read-only. Projecture renders plain message text and identifies unsupported attachments/widgets with a placeholder and live-chat link instead of reproducing ChatGPT's composer, streaming, tools, or artifact runtime.
+
+Two to four panes can scroll independently or by a shared proportional scroll ratio. Searches and hidden-message state are ephemeral. Saved multi-chats retain only their name, ordered chat IDs, and pane scroll positions.
+
 ## Local intelligence
 
 Projecture builds token-frequency profiles from Project names/descriptions plus chat titles/snippets. TF/IDF-like weighting and cosine similarity provide conservative local move suggestions and Project-overlap warnings. No external AI call is made for these built-in suggestions.
@@ -27,14 +33,23 @@ The optional AI-triage workflow exports a prompt/JSON payload for semantic class
 
 ## Persistence
 
-Projecture stores browser-local configuration in two keys:
+Projecture stores browser-local configuration in channel-specific keys:
 
 - `projecture.settings.v1`: board/UI settings.
 - `projecture.favicons.v1`: favicon master state and Project/chat rules.
+- `projecture.multichats.v1`: active saved multi-chat definitions.
+- `projecture.portable.v1`: timestamped portable records and deletion tombstones used for sync.
+- `projecture.google-drive.v1`: local-only Apps Script endpoint and secret.
 
-Generated Preview builds use `projecture.preview.settings.v1` and `projecture.preview.favicons.v1`. This explicit suffix is required because Projecture uses page `localStorage`; Tampermonkey's separate Preview namespace alone does not isolate page storage.
+Generated Preview builds use equivalent `projecture.preview.*` keys. This explicit suffix is required because Projecture uses page `localStorage`; Tampermonkey's separate Preview namespace alone does not isolate page storage.
 
 Legacy Organizer settings are read from `cgptProjectOrganizer.settings.v1` when no current Projecture settings exist. Legacy data is copied forward rather than deleted automatically.
+
+## Google Drive synchronization
+
+Optional Drive transport follows a read → validate → merge → conditional-write loop through a user-owned Apps Script bridge. Portable scalar settings and independently addressable map entries carry timestamps. Saved multi-chat and favicon deletions remain as tombstones, preventing a stale second browser from resurrecting them. A bridge revision guards concurrent writes; Projecture retries conflicts after rereading the newest cloud state.
+
+Column width is excluded from portable state because physical dimensions should remain device-specific. Bridge credentials, current searches/selections, loaded messages, and tokens are also local-only.
 
 ## Preview channel
 
