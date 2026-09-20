@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         Projecture
 // @namespace    https://nathanburgdorff.com/userscripts/
-// @version      1.1.3
-// @description  Organize ChatGPT projects and chats with drag/drop, search, bulk moves, insights, custom favicons, export, and more.
+// @version      1.2.0
+// @description  Organize and compare ChatGPT chats with native Project moves, saved multi-chat views, Drive sync, favicons, and insights.
 // @author       Nathan Burgdorff + Ari (ChatGPT)
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @icon         https://chatgpt.com/favicon.ico
 // @license      GPL-3.0-or-later
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -43,11 +45,14 @@
     const IS_PREVIEW_BUILD = UserscriptBuildChannel === 'preview';
     const APP = IS_PREVIEW_BUILD ? 'Projecture [PREVIEW]' : 'Projecture';
     const PREFIX = IS_PREVIEW_BUILD ? '[Projecture Preview]' : '[Projecture]';
-    const VERSION = '1.1.3';
+    const VERSION = '1.2.0';
     const STORAGE_PREFIX = IS_PREVIEW_BUILD ? 'projecture.preview' : 'projecture';
     const STORAGE_KEY = `${STORAGE_PREFIX}.settings.v1`;
     const LEGACY_STORAGE_KEY = IS_PREVIEW_BUILD ? null : 'cgptProjectOrganizer.settings.v1';
     const FAVICON_STORAGE_KEY = `${STORAGE_PREFIX}.favicons.v1`;
+    const MULTICHAT_STORAGE_KEY = `${STORAGE_PREFIX}.multichats.v1`;
+    const PORTABLE_STORAGE_KEY = `${STORAGE_PREFIX}.portable.v1`;
+    const GOOGLE_DRIVE_CONFIG_STORAGE_KEY = `${STORAGE_PREFIX}.google-drive.v1`;
     const LEGACY_FAVICON_LOCAL_STORAGE_KEY = IS_PREVIEW_BUILD ? null : 'ChatGPTCustomFavicons';
     const BUTTON_ID = 'projecture-launcher';
     const ROOT_ID = 'projecture-root';
@@ -59,6 +64,18 @@
     const MOVE_PAUSE_MS = 120;
     const FAVICON_CHECK_INTERVAL_MS = 2000;
     const FAVICON_FALLBACK_ID = 'projecture-favicon-fallback';
+    const CLOUD_SYNC_PROTOCOL_VERSION = 1;
+    const CLOUD_SYNC_DEBOUNCE_MS = 1400;
+    const PORTABLE_FORMAT = 'ProjecturePortableState';
+    const PORTABLE_VERSION = 1;
+    const MULTICHAT_VERSION = 1;
+    const MAX_COMPARE_CHATS = 4;
+    const MIN_COMPARE_CHATS = 2;
+    const PORTABLE_SETTING_KEYS = [
+        'sort', 'view', 'compact', 'showSnippets', 'showDates', 'suggestions',
+        'confirmBulkMove', 'includeArchived'
+    ];
+    const PORTABLE_SETTING_MAPS = ['collapsed', 'hiddenProjects', 'customColors'];
 
     const STOP_WORDS = new Set(`
         a an and are as at be been but by can chat chats conversation conversations could did do does doing
@@ -91,6 +108,11 @@
         columnWidth: 330,
     };
 
+    const DEFAULT_MULTICHAT_LIBRARY = {
+        version: MULTICHAT_VERSION,
+        views: {},
+    };
+
     let state = {
         open: false,
         loading: false,
@@ -118,7 +140,26 @@
         faviconSettings: loadFaviconSettings(),
         faviconView: 'configured',
         faviconSearch: '',
+        multiChats: loadMultiChatLibrary(),
+        savedMultiChatsOpen: false,
+        mode: 'board',
+        compare: createEmptyCompareState(),
+        driveConfig: loadGoogleDriveConfig(),
+        cloudStatus: 'Off',
+        cloudLastSyncAt: null,
+        cloudLastError: null,
     };
+
+    let portableState = loadOrCreatePortableState();
+    let cloudSyncTimer = null;
+    let cloudSyncInFlight = false;
+    let cloudSyncPending = false;
+    let suppressPortableUpdates = false;
+    let compareScrollTimer = null;
+    let compareSessionCounter = 0;
+
+    applyPortableStateToRuntime();
+    state.cloudStatus = state.driveConfig?.enabled ? 'Ready' : 'Off';
 
     const originalFavicons = new WeakMap();
     const faviconCache = new Map();
@@ -193,12 +234,469 @@
         }
     }
 
+    function createEmptyCompareState() {
+        return {
+            chatIds: [],
+            conversations: new Map(),
+            errors: new Map(),
+            loading: new Set(),
+            searches: {},
+            hiddenMessages: {},
+            scrollPositions: {},
+            savedViewId: null,
+            baselineSignature: null,
+            syncScroll: false,
+            syncingScroll: false,
+            sessionId: 0,
+        };
+    }
+
+    function normalizeSavedMultiChat(raw, fallbackId = '') {
+        if (!raw || typeof raw !== 'object') return null;
+        const id = String(raw.id || fallbackId || '').trim();
+        const name = String(raw.name || '').trim();
+        const chatIds = [...new Set((Array.isArray(raw.chatIds) ? raw.chatIds : [])
+            .map(value => String(value || '').trim()).filter(Boolean))].slice(0, MAX_COMPARE_CHATS);
+        if (!id || !name || chatIds.length < MIN_COMPARE_CHATS) return null;
+        const positions = {};
+        for (const chatId of chatIds) {
+            const value = Number(raw.scrollPositions?.[chatId]);
+            positions[chatId] = Number.isFinite(value) && value >= 0 ? Math.round(value) : 0;
+        }
+        return {
+            id,
+            name,
+            chatIds,
+            scrollPositions: positions,
+            createdAt: raw.createdAt || new Date().toISOString(),
+            updatedAt: raw.updatedAt || raw.createdAt || new Date().toISOString(),
+        };
+    }
+
+    function loadMultiChatLibrary() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(MULTICHAT_STORAGE_KEY) || '{}');
+            const library = structuredClone(DEFAULT_MULTICHAT_LIBRARY);
+            const source = parsed?.views && typeof parsed.views === 'object' ? parsed.views : {};
+            for (const [id, raw] of Object.entries(source)) {
+                const normalized = normalizeSavedMultiChat(raw, id);
+                if (normalized) library.views[id] = normalized;
+            }
+            return library;
+        } catch {
+            return structuredClone(DEFAULT_MULTICHAT_LIBRARY);
+        }
+    }
+
+    function loadGoogleDriveConfig() {
+        try {
+            const raw = JSON.parse(localStorage.getItem(GOOGLE_DRIVE_CONFIG_STORAGE_KEY) || 'null');
+            if (!raw || typeof raw !== 'object') return null;
+            const endpoint = String(raw.endpoint || '').trim();
+            const secret = String(raw.secret || '').trim();
+            if (!endpoint || !secret) return null;
+            return { version: 1, endpoint, secret, enabled: raw.enabled !== false };
+        } catch {
+            return null;
+        }
+    }
+
+    function saveGoogleDriveConfig() {
+        localStorage.setItem(GOOGLE_DRIVE_CONFIG_STORAGE_KEY, JSON.stringify(state.driveConfig));
+    }
+
+    function timestampRecord(value, updatedAt = Date.now(), deleted = false) {
+        const numericTimestamp = Number(updatedAt);
+        return {
+            value: deleted ? null : structuredClone(value),
+            updatedAt: Number.isFinite(numericTimestamp) && numericTimestamp >= 0 ? numericTimestamp : Date.now(),
+            deleted: !!deleted,
+        };
+    }
+
+    function nextTimestampRecord(current, value, deleted = false) {
+        return timestampRecord(
+            value,
+            Math.max(Date.now(), (Number(current?.updatedAt) || 0) + 1),
+            deleted
+        );
+    }
+
+    function emptyPortableState() {
+        return {
+            format: PORTABLE_FORMAT,
+            version: PORTABLE_VERSION,
+            settings: { scalars: {}, maps: Object.fromEntries(PORTABLE_SETTING_MAPS.map(key => [key, {}])) },
+            favicons: { enabled: null, projects: {}, chats: {} },
+            multiChats: {},
+        };
+    }
+
+    function buildPortableStateFromRuntime(updatedAt = Date.now()) {
+        const result = emptyPortableState();
+        for (const key of PORTABLE_SETTING_KEYS) {
+            result.settings.scalars[key] = timestampRecord(state.settings[key], updatedAt);
+        }
+        for (const mapName of PORTABLE_SETTING_MAPS) {
+            for (const [id, value] of Object.entries(state.settings[mapName] || {})) {
+                result.settings.maps[mapName][id] = timestampRecord(value, updatedAt);
+            }
+        }
+        result.favicons.enabled = timestampRecord(state.faviconSettings.enabled !== false, updatedAt);
+        for (const type of ['projects', 'chats']) {
+            for (const [id, value] of Object.entries(state.faviconSettings[type] || {})) {
+                result.favicons[type][id] = timestampRecord(normalizeFaviconRule(value), updatedAt);
+            }
+        }
+        for (const [id, view] of Object.entries(state.multiChats.views || {})) {
+            result.multiChats[id] = timestampRecord(normalizeSavedMultiChat(view, id), updatedAt);
+        }
+        return result;
+    }
+
+    function normalizeTimestampRecord(raw) {
+        if (!raw || typeof raw !== 'object') return null;
+        const updatedAt = Number(raw.updatedAt);
+        if (!Number.isFinite(updatedAt) || updatedAt < 0) return null;
+        return { value: raw.deleted ? null : structuredClone(raw.value), updatedAt, deleted: !!raw.deleted };
+    }
+
+    function normalizePortableState(raw) {
+        if (!raw || raw.format !== PORTABLE_FORMAT || Number(raw.version) !== PORTABLE_VERSION) {
+            throw new Error('Unsupported Projecture portable-state format.');
+        }
+        const normalized = emptyPortableState();
+        for (const key of PORTABLE_SETTING_KEYS) {
+            const record = normalizeTimestampRecord(raw.settings?.scalars?.[key]);
+            if (record) normalized.settings.scalars[key] = record;
+        }
+        for (const mapName of PORTABLE_SETTING_MAPS) {
+            for (const [id, rawRecord] of Object.entries(raw.settings?.maps?.[mapName] || {})) {
+                const record = normalizeTimestampRecord(rawRecord);
+                if (record) normalized.settings.maps[mapName][id] = record;
+            }
+        }
+        normalized.favicons.enabled = normalizeTimestampRecord(raw.favicons?.enabled);
+        for (const type of ['projects', 'chats']) {
+            for (const [id, rawRecord] of Object.entries(raw.favicons?.[type] || {})) {
+                const record = normalizeTimestampRecord(rawRecord);
+                if (record) normalized.favicons[type][id] = record;
+            }
+        }
+        for (const [id, rawRecord] of Object.entries(raw.multiChats || {})) {
+            const record = normalizeTimestampRecord(rawRecord);
+            if (record) normalized.multiChats[id] = record;
+        }
+        return normalized;
+    }
+
+    function loadOrCreatePortableState() {
+        try {
+            const current = localStorage.getItem(PORTABLE_STORAGE_KEY);
+            if (current) return normalizePortableState(JSON.parse(current));
+        } catch (error) {
+            warn('Could not read portable state; rebuilding it from local Projecture settings.', error);
+        }
+        const hadDurableProjectureState = !!(
+            localStorage.getItem(STORAGE_KEY) ||
+            localStorage.getItem(FAVICON_STORAGE_KEY) ||
+            localStorage.getItem(MULTICHAT_STORAGE_KEY) ||
+            (LEGACY_STORAGE_KEY && localStorage.getItem(LEGACY_STORAGE_KEY)) ||
+            (LEGACY_FAVICON_LOCAL_STORAGE_KEY && localStorage.getItem(LEGACY_FAVICON_LOCAL_STORAGE_KEY))
+        );
+        const created = buildPortableStateFromRuntime(hadDurableProjectureState ? Date.now() : 0);
+        localStorage.setItem(PORTABLE_STORAGE_KEY, JSON.stringify(created));
+        return created;
+    }
+
+    function valuesEqual(a, b) {
+        return JSON.stringify(a) === JSON.stringify(b);
+    }
+
+    function syncRecordMapFromValues(records, values, normalizer = value => value) {
+        const ids = new Set([...Object.keys(records || {}), ...Object.keys(values || {})]);
+        for (const id of ids) {
+            const hasValue = Object.prototype.hasOwnProperty.call(values || {}, id);
+            const current = records[id];
+            if (!hasValue) {
+                if (current && !current.deleted) records[id] = nextTimestampRecord(current, null, true);
+                continue;
+            }
+            const value = normalizer(values[id], id);
+            if (value == null) {
+                if (current && !current.deleted) records[id] = nextTimestampRecord(current, null, true);
+            } else if (!current || current.deleted || !valuesEqual(current.value, value)) {
+                records[id] = nextTimestampRecord(current, value);
+            }
+        }
+    }
+
+    function updatePortableSettingsFromRuntime() {
+        for (const key of PORTABLE_SETTING_KEYS) {
+            const current = portableState.settings.scalars[key];
+            if (!current || current.deleted || !valuesEqual(current.value, state.settings[key])) {
+                portableState.settings.scalars[key] = nextTimestampRecord(current, state.settings[key]);
+            }
+        }
+        for (const mapName of PORTABLE_SETTING_MAPS) {
+            syncRecordMapFromValues(portableState.settings.maps[mapName], state.settings[mapName] || {});
+        }
+    }
+
+    function updatePortableFaviconsFromRuntime() {
+        const enabled = state.faviconSettings.enabled !== false;
+        const current = portableState.favicons.enabled;
+        if (!current || current.deleted || current.value !== enabled) {
+            portableState.favicons.enabled = nextTimestampRecord(current, enabled);
+        }
+        for (const type of ['projects', 'chats']) {
+            syncRecordMapFromValues(portableState.favicons[type], state.faviconSettings[type] || {}, normalizeFaviconRule);
+        }
+    }
+
+    function updatePortableMultiChatsFromRuntime() {
+        syncRecordMapFromValues(portableState.multiChats, state.multiChats.views || {}, (view, id) => normalizeSavedMultiChat(view, id));
+    }
+
+    function persistPortableState({ scheduleSync = true } = {}) {
+        localStorage.setItem(PORTABLE_STORAGE_KEY, JSON.stringify(portableState));
+        if (scheduleSync && !suppressPortableUpdates) scheduleCloudSync();
+    }
+
+    function applyPortableStateToRuntime() {
+        suppressPortableUpdates = true;
+        try {
+            for (const key of PORTABLE_SETTING_KEYS) {
+                const record = portableState.settings.scalars[key];
+                if (record && !record.deleted) state.settings[key] = structuredClone(record.value);
+            }
+            for (const mapName of PORTABLE_SETTING_MAPS) {
+                const values = {};
+                for (const [id, record] of Object.entries(portableState.settings.maps[mapName] || {})) {
+                    if (!record.deleted) values[id] = structuredClone(record.value);
+                }
+                state.settings[mapName] = values;
+            }
+
+            const favicons = structuredClone(DEFAULT_FAVICON_SETTINGS);
+            if (portableState.favicons.enabled && !portableState.favicons.enabled.deleted) {
+                favicons.enabled = portableState.favicons.enabled.value !== false;
+            }
+            for (const type of ['projects', 'chats']) {
+                for (const [id, record] of Object.entries(portableState.favicons[type] || {})) {
+                    if (record.deleted) continue;
+                    const rule = normalizeFaviconRule(record.value);
+                    if (rule) favicons[type][id] = rule;
+                }
+            }
+            state.faviconSettings = favicons;
+
+            const library = structuredClone(DEFAULT_MULTICHAT_LIBRARY);
+            for (const [id, record] of Object.entries(portableState.multiChats || {})) {
+                if (record.deleted) continue;
+                const view = normalizeSavedMultiChat(record.value, id);
+                if (view) library.views[id] = view;
+            }
+            state.multiChats = library;
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state.settings));
+            localStorage.setItem(FAVICON_STORAGE_KEY, JSON.stringify(state.faviconSettings));
+            localStorage.setItem(MULTICHAT_STORAGE_KEY, JSON.stringify(state.multiChats));
+        } finally {
+            suppressPortableUpdates = false;
+        }
+    }
+
     function saveSettings() {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state.settings));
+        if (!suppressPortableUpdates) {
+            const before = JSON.stringify(portableState);
+            updatePortableSettingsFromRuntime();
+            persistPortableState({ scheduleSync: before !== JSON.stringify(portableState) });
+        }
     }
 
     function saveFaviconSettings() {
         localStorage.setItem(FAVICON_STORAGE_KEY, JSON.stringify(state.faviconSettings));
+        if (!suppressPortableUpdates) {
+            const before = JSON.stringify(portableState);
+            updatePortableFaviconsFromRuntime();
+            persistPortableState({ scheduleSync: before !== JSON.stringify(portableState) });
+        }
+    }
+
+    function saveMultiChatLibrary() {
+        localStorage.setItem(MULTICHAT_STORAGE_KEY, JSON.stringify(state.multiChats));
+        if (!suppressPortableUpdates) {
+            const before = JSON.stringify(portableState);
+            updatePortableMultiChatsFromRuntime();
+            persistPortableState({ scheduleSync: before !== JSON.stringify(portableState) });
+        }
+    }
+
+    function compareTimestampRecords(left, right) {
+        if (!left) return right ? structuredClone(right) : null;
+        if (!right) return structuredClone(left);
+        if (right.updatedAt > left.updatedAt) return structuredClone(right);
+        if (left.updatedAt > right.updatedAt) return structuredClone(left);
+        return JSON.stringify(right).localeCompare(JSON.stringify(left)) > 0
+            ? structuredClone(right)
+            : structuredClone(left);
+    }
+
+    function mergeRecordMaps(left = {}, right = {}) {
+        const merged = {};
+        for (const id of new Set([...Object.keys(left), ...Object.keys(right)])) {
+            const record = compareTimestampRecords(left[id], right[id]);
+            if (record) merged[id] = record;
+        }
+        return merged;
+    }
+
+    function mergePortableStates(localRaw, remoteRaw) {
+        const local = normalizePortableState(localRaw);
+        const remote = normalizePortableState(remoteRaw);
+        const merged = emptyPortableState();
+        merged.settings.scalars = mergeRecordMaps(local.settings.scalars, remote.settings.scalars);
+        for (const mapName of PORTABLE_SETTING_MAPS) {
+            merged.settings.maps[mapName] = mergeRecordMaps(local.settings.maps[mapName], remote.settings.maps[mapName]);
+        }
+        merged.favicons.enabled = compareTimestampRecords(local.favicons.enabled, remote.favicons.enabled);
+        merged.favicons.projects = mergeRecordMaps(local.favicons.projects, remote.favicons.projects);
+        merged.favicons.chats = mergeRecordMaps(local.favicons.chats, remote.favicons.chats);
+        merged.multiChats = mergeRecordMaps(local.multiChats, remote.multiChats);
+        return merged;
+    }
+
+    function configureGoogleDriveSync() {
+        const endpointInput = prompt(
+            'Google Drive sync uses a small Google Apps Script bridge that you own.\n\nPaste its deployed Web App URL (/exec) here. Leave this blank to disconnect Drive sync.',
+            state.driveConfig?.endpoint || ''
+        );
+        if (endpointInput === null) return;
+        const endpoint = endpointInput.trim();
+        if (!endpoint) {
+            if (state.driveConfig && confirm('Disconnect Google Drive sync on this browser?')) {
+                state.driveConfig = null;
+                saveGoogleDriveConfig();
+                state.cloudStatus = 'Off';
+                state.cloudLastError = null;
+                render();
+            }
+            return;
+        }
+        if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:\?.*)?$/i.test(endpoint)) {
+            alert('That does not look like a deployed Google Apps Script Web App URL. It should begin with https://script.google.com/macros/s/ and end with /exec.');
+            return;
+        }
+        const secretInput = prompt('Paste the Projecture sync secret printed by the bridge\'s Setup() function.', state.driveConfig?.secret || '');
+        if (secretInput === null) return;
+        const secret = secretInput.trim();
+        if (!secret) {
+            alert('A non-empty sync secret is required.');
+            return;
+        }
+        state.driveConfig = { version: 1, endpoint, secret, enabled: true };
+        saveGoogleDriveConfig();
+        state.cloudStatus = 'Ready';
+        state.cloudLastError = null;
+        render();
+        syncWithGoogleDrive({ manual: true });
+    }
+
+    function scheduleCloudSync(delayMs = CLOUD_SYNC_DEBOUNCE_MS) {
+        if (!state.driveConfig?.enabled || suppressPortableUpdates) return;
+        clearTimeout(cloudSyncTimer);
+        cloudSyncTimer = setTimeout(() => {
+            cloudSyncTimer = null;
+            syncWithGoogleDrive();
+        }, Math.max(0, delayMs));
+    }
+
+    function googleDriveBridgeRequest(action, payload = {}) {
+        if (!state.driveConfig?.enabled || typeof GM_xmlhttpRequest !== 'function') {
+            return Promise.reject(new Error('Google Drive sync is not configured or Tampermonkey did not grant cross-origin access.'));
+        }
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: state.driveConfig.endpoint,
+                headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+                data: JSON.stringify({
+                    ProtocolVersion: CLOUD_SYNC_PROTOCOL_VERSION,
+                    Secret: state.driveConfig.secret,
+                    Action: action,
+                    ...payload,
+                }),
+                timeout: 30000,
+                onload: response => {
+                    try {
+                        if (response.status < 200 || response.status >= 300) {
+                            throw new Error(`Google Drive bridge returned HTTP ${response.status}.`);
+                        }
+                        const parsed = JSON.parse(response.responseText);
+                        if (!parsed || typeof parsed !== 'object') throw new Error('Google Drive bridge returned an invalid response.');
+                        if (parsed.Status === 'error') throw new Error(parsed.Message || 'Google Drive bridge reported an error.');
+                        resolve(parsed);
+                    } catch (error) {
+                        reject(error);
+                    }
+                },
+                onerror: () => reject(new Error('Could not reach the Google Drive sync bridge.')),
+                ontimeout: () => reject(new Error('Google Drive sync timed out.')),
+            });
+        });
+    }
+
+    async function syncWithGoogleDrive({ manual = false } = {}) {
+        if (!state.driveConfig?.enabled) {
+            if (manual) configureGoogleDriveSync();
+            return;
+        }
+        if (cloudSyncInFlight) {
+            cloudSyncPending = true;
+            return;
+        }
+        cloudSyncInFlight = true;
+        cloudSyncPending = false;
+        state.cloudStatus = 'Syncing';
+        state.cloudLastError = null;
+        render();
+        try {
+            let completed = false;
+            for (let attempt = 0; attempt < 3 && !completed; attempt++) {
+                const remote = await googleDriveBridgeRequest('Read');
+                const revision = Number(remote.Revision) || 0;
+                if (remote.Data) {
+                    portableState = mergePortableStates(portableState, remote.Data);
+                    localStorage.setItem(PORTABLE_STORAGE_KEY, JSON.stringify(portableState));
+                    applyPortableStateToRuntime();
+                }
+                const write = await googleDriveBridgeRequest('Write', {
+                    ExpectedRevision: revision,
+                    Data: normalizePortableState(portableState),
+                });
+                if (write.Status === 'conflict') continue;
+                if (write.Status !== 'ok') throw new Error(write.Message || 'Google Drive sync write failed.');
+                completed = true;
+                state.cloudLastSyncAt = new Date().toISOString();
+            }
+            if (!completed) throw new Error('Google Drive changed repeatedly during sync. Please try again.');
+            state.cloudStatus = 'Synced';
+            syncFavicon();
+            render();
+        } catch (error) {
+            state.cloudStatus = 'Error';
+            state.cloudLastError = error;
+            console.error(PREFIX, 'Google Drive sync failed.', error);
+            render();
+            if (manual) alert(`Google Drive sync failed: ${error?.message || String(error)}`);
+        } finally {
+            cloudSyncInFlight = false;
+            if (cloudSyncPending) {
+                cloudSyncPending = false;
+                scheduleCloudSync(250);
+            }
+        }
     }
 
     function deepMerge(base, patch) {
@@ -444,6 +942,250 @@
             return backendFetch(path, options, false);
         }
         return res;
+    }
+
+    function contentPartToText(part, unsupported) {
+        if (typeof part === 'string') return part;
+        if (!part || typeof part !== 'object') return '';
+        if (typeof part.text === 'string') return part.text;
+        if (typeof part.content === 'string') return part.content;
+        const type = String(part.content_type || part.type || 'rich content');
+        const labels = {
+            image_asset_pointer: 'Image attachment',
+            audio_asset_pointer: 'Audio attachment',
+            real_time_user_audio_video_asset_pointer: 'Audio/video attachment',
+            tether_quote: 'Quoted source',
+        };
+        unsupported.add(labels[type] || type.replaceAll('_', ' '));
+        return '';
+    }
+
+    function normalizeConversationMessage(node) {
+        const message = node?.message;
+        if (!message) return null;
+        const role = String(message.author?.role || 'unknown');
+        if (role === 'system' && !message.metadata?.is_user_system_message) return null;
+        const content = message.content || {};
+        const unsupported = new Set();
+        const parts = Array.isArray(content.parts) ? content.parts : [];
+        let text = parts.map(part => contentPartToText(part, unsupported)).filter(Boolean).join('\n');
+        if (!text && typeof content.text === 'string') text = content.text;
+        if (!text && typeof content.result === 'string') text = content.result;
+        const contentType = String(content.content_type || 'text');
+        const supportedTypes = new Set(['text', 'multimodal_text', 'code', 'execution_output']);
+        if (!supportedTypes.has(contentType)) unsupported.add(contentType.replaceAll('_', ' '));
+        if (!text && !unsupported.size) return null;
+        return {
+            id: String(message.id || node.id || `message-${hashString(`${role}:${text}:${message.create_time || ''}`)}`),
+            role,
+            text: String(text || ''),
+            contentType,
+            unsupported: [...unsupported],
+            createdAt: message.create_time || null,
+        };
+    }
+
+    function normalizeConversationData(raw, chat) {
+        const mapping = raw?.mapping && typeof raw.mapping === 'object' ? raw.mapping : {};
+        const orderedNodes = [];
+        const visited = new Set();
+        let currentId = raw?.current_node || null;
+        while (currentId && mapping[currentId] && !visited.has(currentId)) {
+            visited.add(currentId);
+            orderedNodes.push(mapping[currentId]);
+            currentId = mapping[currentId]?.parent || null;
+        }
+        orderedNodes.reverse();
+        if (!orderedNodes.length) {
+            orderedNodes.push(...Object.values(mapping).sort((a, b) =>
+                dateValue(a?.message?.create_time) - dateValue(b?.message?.create_time)));
+        }
+        return {
+            id: chat.id,
+            title: raw?.title || chat.title,
+            messages: orderedNodes.map(normalizeConversationMessage).filter(Boolean),
+        };
+    }
+
+    async function fetchConversationData(chatId) {
+        const chat = chatById(chatId);
+        if (!chat) throw new Error('This chat is no longer present in the loaded library.');
+        const response = await backendFetch(`/backend-api/conversation/${encodeURIComponent(chatId)}`);
+        if (!response.ok) throw new Error(`Could not load “${chat.title}” (HTTP ${response.status}).`);
+        return normalizeConversationData(await response.json(), chat);
+    }
+
+    function captureCompareScrollPositions() {
+        if (!state.shadow || state.mode !== 'compare') return state.compare.scrollPositions;
+        state.shadow.querySelectorAll('.compare-messages[data-chat-id]').forEach(pane => {
+            if (pane.querySelector('.compare-loading')) return;
+            state.compare.scrollPositions[pane.dataset.chatId] = Math.max(0, Math.round(pane.scrollTop));
+        });
+        return state.compare.scrollPositions;
+    }
+
+    function compareSnapshot() {
+        captureCompareScrollPositions();
+        const positions = {};
+        for (const id of state.compare.chatIds) positions[id] = Number(state.compare.scrollPositions[id]) || 0;
+        return { chatIds: [...state.compare.chatIds], scrollPositions: positions };
+    }
+
+    function compareSignature(snapshot = compareSnapshot()) {
+        return JSON.stringify(snapshot);
+    }
+
+    function compareIsDirty() {
+        return !!state.compare.savedViewId && compareSignature() !== state.compare.baselineSignature;
+    }
+
+    function updateCompareSaveButtons() {
+        if (!state.shadow || state.mode !== 'compare') return;
+        const dirty = compareIsDirty();
+        for (const action of ['save-multichat', 'save-as-multichat']) {
+            const button = state.shadow.querySelector(`[data-action="${action}"]`);
+            if (button) button.disabled = !dirty;
+        }
+        const label = state.shadow.getElementById('compareDirtyLabel');
+        if (label) label.textContent = dirty ? 'Unsaved changes' : 'Saved';
+    }
+
+    function restoreCompareScrollPositions() {
+        if (!state.shadow || state.mode !== 'compare') return;
+        state.shadow.querySelectorAll('.compare-messages[data-chat-id]').forEach(pane => {
+            pane.scrollTop = Number(state.compare.scrollPositions[pane.dataset.chatId]) || 0;
+        });
+    }
+
+    async function openCompareView(chatIds, { savedViewId = null, scrollPositions = {} } = {}) {
+        const ids = [...new Set(chatIds.map(id => String(id || '').trim()).filter(Boolean))];
+        if (ids.length < MIN_COMPARE_CHATS || ids.length > MAX_COMPARE_CHATS) {
+            setStatus(`Compare View requires ${MIN_COMPARE_CHATS}–${MAX_COMPARE_CHATS} chats.`, 'error', 7000);
+            return;
+        }
+        state.mode = 'compare';
+        state.compare = createEmptyCompareState();
+        const sessionId = ++compareSessionCounter;
+        state.compare.sessionId = sessionId;
+        state.compare.chatIds = ids;
+        state.compare.savedViewId = savedViewId;
+        for (const id of ids) state.compare.scrollPositions[id] = Number(scrollPositions[id]) || 0;
+        state.compare.baselineSignature = savedViewId ? compareSignature({
+            chatIds: ids,
+            scrollPositions: Object.fromEntries(ids.map(id => [id, Number(scrollPositions[id]) || 0])),
+        }) : null;
+        for (const id of ids) {
+            if (chatById(id)) state.compare.loading.add(id);
+            else state.compare.errors.set(id, 'This chat is missing from the current ChatGPT library.');
+        }
+        render();
+
+        await Promise.all(ids.map(async id => {
+            if (!chatById(id)) return;
+            try {
+                const conversation = await fetchConversationData(id);
+                if (state.mode !== 'compare' || state.compare.sessionId !== sessionId) return;
+                state.compare.conversations.set(id, conversation);
+            } catch (error) {
+                if (state.mode !== 'compare' || state.compare.sessionId !== sessionId) return;
+                state.compare.errors.set(id, error?.message || String(error));
+            } finally {
+                if (state.mode !== 'compare' || state.compare.sessionId !== sessionId) return;
+                state.compare.loading.delete(id);
+                render();
+            }
+        }));
+        restoreCompareScrollPositions();
+    }
+
+    function closeCompareView() {
+        captureCompareScrollPositions();
+        state.mode = 'board';
+        state.compare = createEmptyCompareState();
+        render();
+    }
+
+    function makeMultiChatId() {
+        return `multichat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+
+    function promptForMultiChatName(defaultName = '') {
+        const entered = prompt('Name this multi-chat view:', defaultName);
+        if (entered === null) return null;
+        const name = entered.trim();
+        if (!name) {
+            setStatus('A saved multi-chat needs a name.', 'error');
+            return null;
+        }
+        return name;
+    }
+
+    function saveCurrentMultiChat({ saveAs = false } = {}) {
+        if (state.mode !== 'compare') return;
+        const existing = state.compare.savedViewId ? state.multiChats.views[state.compare.savedViewId] : null;
+        const needsNew = !existing || saveAs;
+        const name = needsNew ? promptForMultiChatName(existing?.name || '') : existing.name;
+        if (!name) return;
+        const snapshot = compareSnapshot();
+        const now = new Date().toISOString();
+        const id = needsNew ? makeMultiChatId() : existing.id;
+        const view = normalizeSavedMultiChat({
+            id,
+            name,
+            ...snapshot,
+            createdAt: needsNew ? now : existing.createdAt,
+            updatedAt: now,
+        }, id);
+        state.multiChats.views[id] = view;
+        saveMultiChatLibrary();
+        state.compare.savedViewId = id;
+        state.compare.baselineSignature = compareSignature(snapshot);
+        state.savedMultiChatsOpen = true;
+        render();
+        setStatus(`${needsNew ? 'Saved' : 'Updated'} multi-chat “${name}”.`, 'success');
+    }
+
+    function deleteCurrentMultiChat() {
+        const id = state.compare.savedViewId;
+        const view = id ? state.multiChats.views[id] : null;
+        if (!view) return;
+        if (!confirm(`Delete the saved multi-chat “${view.name}”?\n\nThe chats themselves will not be deleted.`)) return;
+        delete state.multiChats.views[id];
+        saveMultiChatLibrary();
+        state.compare.savedViewId = null;
+        state.compare.baselineSignature = null;
+        render();
+        setStatus(`Deleted saved multi-chat “${view.name}”.`, 'success');
+    }
+
+    function reorderCompareChat(chatId, direction) {
+        captureCompareScrollPositions();
+        const index = state.compare.chatIds.indexOf(chatId);
+        const target = index + direction;
+        if (index < 0 || target < 0 || target >= state.compare.chatIds.length) return;
+        [state.compare.chatIds[index], state.compare.chatIds[target]] = [state.compare.chatIds[target], state.compare.chatIds[index]];
+        render();
+    }
+
+    function removeCompareChat(chatId) {
+        if (state.compare.chatIds.length <= MIN_COMPARE_CHATS) {
+            setStatus(`A multi-chat needs at least ${MIN_COMPARE_CHATS} chats.`, 'info');
+            return;
+        }
+        captureCompareScrollPositions();
+        state.compare.chatIds = state.compare.chatIds.filter(id => id !== chatId);
+        delete state.compare.scrollPositions[chatId];
+        render();
+    }
+
+    async function copyConversation(chatId) {
+        const conversation = state.compare.conversations.get(chatId);
+        if (!conversation) return;
+        const text = conversation.messages.map(message =>
+            `${message.role.toUpperCase()}:\n${message.text || `[${message.unsupported.join(', ') || 'Unsupported content'}]`}`
+        ).join('\n\n');
+        await copyText(text);
+        setStatus(`Copied “${conversation.title}”.`, 'success');
     }
 
     async function fetchProjects(signal) {
@@ -1160,6 +1902,8 @@
                 customGpt: c.customGpt, customGptId: c.customGptId, customGptName: c.customGptName
             })),
             favicons: state.faviconSettings,
+            savedMultiChats: state.multiChats,
+            portableState: normalizePortableState(portableState),
         };
         download(`projecture-organization-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data, null, 2));
         setStatus('Exported organization snapshot.', 'success');
@@ -1355,10 +2099,136 @@
         });
     }
 
+    function driveButtonLabel() {
+        if (!state.driveConfig?.enabled) return 'Drive: Setup';
+        return {
+            Ready: 'Drive: Sync',
+            Syncing: 'Drive: Syncing…',
+            Synced: 'Drive: ✓',
+            Error: 'Drive: Error',
+        }[state.cloudStatus] || 'Drive: Sync';
+    }
+
+    function driveButtonTitle() {
+        const lines = [state.driveConfig?.enabled
+            ? 'Click to sync now. Shift-click to reconfigure or disconnect.'
+            : 'Configure Google Drive synchronization.'];
+        if (state.cloudLastSyncAt) lines.push(`Last synced: ${new Date(state.cloudLastSyncAt).toLocaleString()}`);
+        if (state.cloudLastError) lines.push(`Last error: ${state.cloudLastError.message || state.cloudLastError}`);
+        return lines.join('\n');
+    }
+
+    function renderSavedMultiChatsHtml() {
+        const views = Object.values(state.multiChats.views || {})
+            .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+        const rows = views.length ? views.map(view => {
+            const titles = view.chatIds.map(id => chatById(id)?.title || `[Missing chat: ${id}]`);
+            return `<button class="saved-multichat-row" data-action="open-saved-multichat" data-view-id="${escapeHtml(view.id)}">
+                <span class="saved-multichat-name">${escapeHtml(view.name)}</span>
+                <span class="saved-multichat-meta">${view.chatIds.length} chats · ${escapeHtml(titles.join(' · '))}</span>
+            </button>`;
+        }).join('') : '<div class="muted saved-multichat-empty">No saved multi-chats yet. Select 2–4 chats and choose Compare.</div>';
+        return `<div class="drawer-header"><div><strong>Saved multi-chats</strong><div class="muted">Named read-only workspaces with per-chat scroll positions.</div></div><button class="icon-btn small" data-action="close-drawers">×</button></div><div class="saved-multichat-list">${rows}</div>`;
+    }
+
+    function highlightText(text, query) {
+        const source = String(text || '');
+        const needle = String(query || '').trim();
+        if (!needle) return escapeHtml(source);
+        const lower = source.toLowerCase();
+        const wanted = needle.toLowerCase();
+        let cursor = 0;
+        let output = '';
+        while (cursor < source.length) {
+            const index = lower.indexOf(wanted, cursor);
+            if (index < 0) {
+                output += escapeHtml(source.slice(cursor));
+                break;
+            }
+            output += escapeHtml(source.slice(cursor, index));
+            output += `<mark>${escapeHtml(source.slice(index, index + wanted.length))}</mark>`;
+            cursor = index + wanted.length;
+        }
+        return output;
+    }
+
+    function renderCompareMessage(chatId, message, query) {
+        const hidden = !!state.compare.hiddenMessages[chatId]?.[message.id];
+        const roleLabel = message.role === 'assistant' ? 'ChatGPT' : message.role === 'user' ? 'You' : message.role;
+        const matches = !query || `${message.text}\n${message.unsupported.join(' ')}`.toLowerCase().includes(query.toLowerCase());
+        if (!matches) return '';
+        const unsupported = message.unsupported.length
+            ? `<div class="unsupported-content">Unsupported/linked content: ${escapeHtml(message.unsupported.join(', '))}. <a href="${escapeHtml(chatUrl(chatById(chatId)))}" target="_blank">Open original</a></div>`
+            : '';
+        return `<article class="compare-message role-${escapeHtml(message.role)} ${hidden ? 'message-hidden' : ''}" data-message-id="${escapeHtml(message.id)}">
+            <header><strong>${escapeHtml(roleLabel)}</strong><span class="message-type">${escapeHtml(message.contentType)}</span><span class="spacer"></span>
+                <button class="text-btn" data-action="toggle-compare-message" data-chat-id="${escapeHtml(chatId)}" data-message-id="${escapeHtml(message.id)}">${hidden ? 'Show' : 'Hide'}</button>
+                <button class="text-btn" data-action="copy-compare-message" data-chat-id="${escapeHtml(chatId)}" data-message-id="${escapeHtml(message.id)}">Copy</button>
+            </header>
+            ${hidden ? '' : `<div class="message-text">${highlightText(message.text, query)}</div>${unsupported}`}
+        </article>`;
+    }
+
+    function renderComparePane(chatId, index) {
+        const chat = chatById(chatId);
+        if (!chat) return `<section class="compare-pane missing-pane" data-chat-id="${escapeHtml(chatId)}"><div class="missing-chat">This saved chat is no longer available: ${escapeHtml(chatId)}</div></section>`;
+        const project = chat.projectId ? projectById(chat.projectId) : null;
+        const conversation = state.compare.conversations.get(chatId);
+        const error = state.compare.errors.get(chatId);
+        const query = state.compare.searches[chatId] || '';
+        let body = '<div class="compare-loading"><span class="spinner"></span>Loading conversation…</div>';
+        if (error) body = `<div class="compare-error">${escapeHtml(error)}<br><a href="${escapeHtml(chatUrl(chat))}" target="_blank">Open live chat</a></div>`;
+        if (conversation) {
+            const messages = conversation.messages.map(message => renderCompareMessage(chatId, message, query)).join('');
+            body = messages || '<div class="compare-empty">No messages match this pane search.</div>';
+        }
+        return `<section class="compare-pane" data-chat-id="${escapeHtml(chatId)}">
+            <header class="compare-pane-header">
+                <div class="compare-title-wrap"><strong title="${escapeHtml(chat.title)}">${escapeHtml(chat.title)}</strong><span>${escapeHtml(project?.name || (chat.customGptName ? `Custom GPT: ${chat.customGptName}` : 'Unassigned'))}</span></div>
+                <div class="compare-pane-actions">
+                    <button class="text-btn" data-action="move-compare-left" data-chat-id="${escapeHtml(chatId)}" ${index === 0 ? 'disabled' : ''} title="Move pane left">←</button>
+                    <button class="text-btn" data-action="move-compare-right" data-chat-id="${escapeHtml(chatId)}" ${index === state.compare.chatIds.length - 1 ? 'disabled' : ''} title="Move pane right">→</button>
+                    <button class="text-btn" data-action="remove-compare-pane" data-chat-id="${escapeHtml(chatId)}" title="Remove pane">×</button>
+                    <a class="btn ghost compare-open-live" href="${escapeHtml(chatUrl(chat))}" target="_blank">Open live ↗</a>
+                </div>
+            </header>
+            <div class="compare-pane-tools"><div class="search-wrap compare-search"><span>⌕</span><input data-compare-search="${escapeHtml(chatId)}" type="search" placeholder="Search this chat…" value="${escapeHtml(query)}"></div><button class="btn ghost" data-action="copy-conversation" data-chat-id="${escapeHtml(chatId)}">Copy all</button></div>
+            <div class="compare-body compare-messages" data-chat-id="${escapeHtml(chatId)}">${body}</div>
+        </section>`;
+    }
+
+    function renderCompare(app) {
+        captureCompareScrollPositions();
+        const saved = state.compare.savedViewId ? state.multiChats.views[state.compare.savedViewId] : null;
+        const dirty = compareIsDirty();
+        app.innerHTML = `<div class="overlay-shell compare-shell">
+            <header class="topbar">
+                <div class="topbar-left"><button class="btn ghost" data-action="close-compare">← Organizer</button><div class="brand"><div class="brand-icon">▦</div><div><div class="brand-title">${escapeHtml(saved?.name || 'Multi-chat Compare')}</div><div class="brand-sub">${state.compare.chatIds.length} read-only conversations${saved ? ` · <span id="compareDirtyLabel">${dirty ? 'Unsaved changes' : 'Saved'}</span>` : ''}</div></div></div></div>
+                <div class="top-actions compare-top-actions">
+                    <label class="sync-scroll"><input id="syncCompareScroll" type="checkbox" ${state.compare.syncScroll ? 'checked' : ''}> Sync scroll</label>
+                    <button class="btn ghost" data-action="toggle-saved-multichats">Saved multi-chats (${Object.keys(state.multiChats.views).length})</button>
+                    ${saved ? `<button class="btn primary" data-action="save-multichat" ${dirty ? '' : 'disabled'}>Save</button><button class="btn ghost" data-action="save-as-multichat" ${dirty ? '' : 'disabled'}>Save as…</button><button class="btn danger-subtle" data-action="delete-multichat">Delete</button>` : '<button class="btn primary" data-action="save-new-multichat">Save new multi-chat view</button>'}
+                    <button class="icon-btn" data-action="close" title="Close Projecture">×</button>
+                </div>
+            </header>
+            <div id="statusArea" class="status-area">${renderStatusHtml()}</div>
+            <div class="drawer-stack"><div id="savedMultiChatsPanel" class="drawer ${state.savedMultiChatsOpen ? '' : 'hidden'}">${renderSavedMultiChatsHtml()}</div></div>
+            <main class="compare-grid" style="--compare-count:${state.compare.chatIds.length}">${state.compare.chatIds.map(renderComparePane).join('')}</main>
+            <footer class="footer"><span>Read-only Compare View · each pane scrolls independently</span><span>v${VERSION} · Nathan Burgdorff + Ari (ChatGPT)</span></footer>
+        </div>`;
+        wireRenderedEvents();
+        restoreCompareScrollPositions();
+    }
+
     function render() {
         if (!state.shadow || !state.open) return;
         const app = state.shadow.getElementById('app');
         if (!app) return;
+
+        if (state.mode === 'compare') {
+            renderCompare(app);
+            return;
+        }
 
         const scrollState = captureBoardScroll(app);
 
@@ -1384,10 +2254,12 @@
                         <div class="brand-actions">
                             <button class="btn ghost" data-action="toggle-favicons">🎨 Favicons</button>
                             <button class="btn ghost" data-action="toggle-insights">✦ Insights</button>
+                            <button class="btn ghost" data-action="toggle-saved-multichats">▦ Saved multi-chats (${Object.keys(state.multiChats.views).length})</button>
                         </div>
                     </div>
                     <div class="top-actions">
                         <button class="btn ghost" data-action="refresh" ${state.loading ? 'disabled' : ''}>↻ Refresh</button>
+                        <button class="btn ghost drive-button" data-action="drive-sync" title="${escapeHtml(driveButtonTitle())}" ${state.cloudStatus === 'Syncing' ? 'disabled' : ''}>${escapeHtml(driveButtonLabel())}</button>
                         <button class="btn ghost" data-action="undo" ${state.undoStack.length ? '' : 'disabled'}>↶ Undo${state.undoStack.length ? ` (${state.undoStack.length})` : ''}</button>
                         <button class="icon-btn header-gear" data-action="toggle-settings" title="Settings">⚙</button>
                         <button class="icon-btn" data-action="close" title="Close (Esc)">×</button>
@@ -1422,6 +2294,7 @@
                             <button class="text-btn" data-action="invert-visible">Invert visible</button>
                             <button class="text-btn" data-action="clear-selection">Clear</button>
                             ${selectedCustomGptCount ? `<div class="selection-warning" title="ChatGPT does not support Custom GPT chats inside Projects. Moving these chats to a Project converts them to standard ChatGPT chats.">⚠ ${selectedCustomGptCount} Custom GPT</div>` : ''}
+                            <button class="btn ghost" data-action="compare-selected" ${state.selected.size >= MIN_COMPARE_CHATS && state.selected.size <= MAX_COMPARE_CHATS ? '' : 'disabled'} title="Compare ${MIN_COMPARE_CHATS}–${MAX_COMPARE_CHATS} selected chats">Compare</button>
                             <select id="bulkDestination" class="control small"><option value="">Move selected to…</option><option value="__unassigned__">Unassigned</option>${projectOptions}</select>
                             <button class="btn primary" data-action="bulk-move">Move ${state.selected.size}</button>
                         </div>` : ''}
@@ -1432,6 +2305,7 @@
                     <div id="insightsPanel" class="drawer hidden">${renderInsightsHtml()}</div>
                     <div id="faviconsPanel" class="drawer hidden">${renderFaviconsHtml()}</div>
                     <div id="settingsPanel" class="drawer hidden">${renderSettingsHtml()}</div>
+                    <div id="savedMultiChatsPanel" class="drawer ${state.savedMultiChatsOpen ? '' : 'hidden'}">${renderSavedMultiChatsHtml()}</div>
                 </div>
 
                 <main class="board" style="--column-width:${Number(state.settings.columnWidth) || 330}px">
@@ -1672,7 +2546,7 @@
 
     function renderSettingsHtml() {
         return `
-            <div class="drawer-header"><div><strong>Projecture Settings</strong><div class="muted">UI settings are stored only in this browser.</div></div><button class="icon-btn small" data-action="close-drawers">×</button></div>
+            <div class="drawer-header"><div><strong>Projecture Settings</strong><div class="muted">Portable preferences can sync through your Google Drive bridge.</div></div><button class="icon-btn small" data-action="close-drawers">×</button></div>
             <div class="settings-grid">
                 <label><input type="checkbox" id="settingCompact" ${state.settings.compact ? 'checked' : ''}> Compact cards</label>
                 <label><input type="checkbox" id="settingSnippets" ${state.settings.showSnippets ? 'checked' : ''}> Show snippets</label>
@@ -1683,11 +2557,12 @@
             </div>
             <div class="range-row"><span>Column width</span><input type="range" id="columnWidth" min="260" max="480" step="10" value="${Number(state.settings.columnWidth) || 330}"><span>${Number(state.settings.columnWidth) || 330}px</span></div>
             <div class="drawer-section action-row">
+                <button class="btn ghost" data-action="drive-sync">${escapeHtml(driveButtonLabel())}</button>
                 <button class="btn ghost" data-action="export-json">Export JSON</button>
                 <button class="btn ghost" data-action="export-csv">Export CSV</button>
                 <button class="btn danger-subtle" data-action="reset-settings">Reset Projecture UI settings</button>
             </div>
-            <div class="muted tiny">Changing “Include archived” takes effect after Refresh. The script never stores your access token; it is held only in memory for the current page session.</div>`;
+            <div class="muted tiny">Changing “Include archived” takes effect after Refresh. Column width remains device-local. Drive credentials remain local and are never exported or synced. The ChatGPT access token is held only in memory.</div>`;
     }
 
     function styles() {
@@ -1764,6 +2639,9 @@
             .compact .chat-card{padding:6px 6px;margin-bottom:5px}.compact .snippet{display:none}.compact .card-meta{margin-top:2px}.compact .suggestion{margin-top:4px;padding:3px 6px}.compact .drop-zone{padding:6px}
             .popover { position:fixed;z-index:50;min-width:220px;max-width:320px;background:var(--panel);border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow);padding:6px; }.popover button{width:100%;border:0;background:transparent;text-align:left;padding:8px 9px;border-radius:7px;cursor:pointer;font-size:12px}.popover button:hover{background:var(--panel2)}.popover .pop-title{font-size:10px;color:var(--muted);padding:5px 9px}.popover .sep{height:1px;background:var(--line);margin:5px 0}
             .favicon-toolbar { display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px; }.favicon-master{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:650}.favicon-master input{accent-color:var(--accent)}.favicon-search{min-width:220px;max-width:360px;flex:1}.favicon-table{border:1px solid var(--line);border-radius:10px;overflow:auto;max-height:25vh;background:var(--panel2)}.favicon-row{display:grid;grid-template-columns:42px 54px 70px minmax(210px,1.4fr) minmax(150px,1fr) minmax(180px,1fr) 112px;gap:8px;align-items:center;padding:7px 9px;border-bottom:1px solid var(--line);font-size:11px;min-width:930px}.favicon-row:last-child{border-bottom:0}.favicon-head{position:sticky;top:0;z-index:1;background:var(--panel);font-weight:700;color:var(--muted);font-size:10px}.favicon-preview{width:30px;height:30px;border-radius:7px;border:1px solid var(--line);background:var(--panel);display:grid;place-items:center;overflow:hidden;font-size:21px}.favicon-preview img{width:100%;height:100%;object-fit:contain}.favicon-kind{color:var(--muted)}.favicon-name{min-width:0;display:flex;flex-direction:column;gap:2px}.favicon-name strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favicon-project,.favicon-relation{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.favicon-actions{display:flex;align-items:center;justify-content:flex-end;gap:5px}.danger-text{color:#d34c4c}.favicon-empty{padding:18px}.favicon-note{margin-top:8px}
+            .saved-multichat-list{display:grid;gap:7px}.saved-multichat-row{display:flex;flex-direction:column;align-items:flex-start;gap:3px;width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);cursor:pointer;text-align:left}.saved-multichat-row:hover{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}.saved-multichat-name{font-weight:750}.saved-multichat-meta{width:100%;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.saved-multichat-empty{padding:14px}
+            .compare-shell{grid-template-rows:auto auto minmax(0,1fr) auto}.compare-top-actions{min-width:0;overflow-x:auto}.sync-scroll{display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap}.sync-scroll input{accent-color:var(--accent)}
+            .compare-grid{min-width:0;min-height:0;display:grid;grid-template-columns:repeat(var(--compare-count),minmax(320px,1fr));gap:10px;padding:10px 12px;overflow:auto}.compare-pane{min-width:320px;min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr);border:1px solid var(--line);border-radius:13px;background:var(--panel);overflow:hidden}.compare-pane-header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 11px;border-bottom:1px solid var(--line)}.compare-title-wrap{min-width:0;display:flex;flex-direction:column;gap:2px}.compare-title-wrap strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}.compare-title-wrap span{font-size:10px;color:var(--muted)}.compare-pane-actions{display:flex;align-items:center;gap:2px;flex:0 0 auto}.compare-pane-actions .text-btn:disabled{opacity:.35;cursor:default;text-decoration:none}.compare-open-live{display:flex;align-items:center;text-decoration:none;height:30px;padding:0 8px;font-size:10px}.compare-pane-tools{display:flex;align-items:center;gap:7px;padding:7px 9px;border-bottom:1px solid var(--line);background:var(--panel2)}.compare-search{min-width:0;flex:1}.compare-search input{height:30px}.compare-pane-tools .btn{height:32px;padding:0 8px;font-size:10px}.compare-messages{min-height:0;overflow:auto;padding:10px;scrollbar-gutter:stable}.compare-message{border:1px solid var(--line);border-radius:11px;padding:9px 10px;margin-bottom:9px;background:var(--panel2)}.compare-message.role-user{border-left:3px solid #6b8afd}.compare-message.role-assistant{border-left:3px solid var(--accent)}.compare-message header{display:flex;align-items:center;gap:7px;margin-bottom:7px;font-size:11px}.compare-message header .text-btn{font-size:10px;padding:2px 3px}.message-type{color:var(--muted);font-size:9px}.message-text{white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit;font-size:12px;line-height:1.5}.message-text mark{background:#ffe16b;color:#222;border-radius:2px}.message-hidden{opacity:.78}.message-hidden header{margin-bottom:0}.unsupported-content{margin-top:8px;padding:7px;border-radius:7px;background:color-mix(in srgb,#d99000 10%,transparent);color:var(--muted);font-size:10px}.compare-loading,.compare-error,.compare-empty,.missing-chat{display:flex;align-items:center;justify-content:center;gap:8px;min-height:140px;padding:18px;text-align:center;color:var(--muted);font-size:12px}.compare-error{color:#d34c4c}.spacer{flex:1}
             @media (max-width:900px){.settings-grid{grid-template-columns:1fr 1fr}.insight-grid{grid-template-columns:1fr 1fr}.brand-sub{display:none}.brand-actions .btn{padding:0 8px}.top-actions{gap:3px}}
         `;
     }
@@ -1822,6 +2700,7 @@
         const $$ = selector => [...state.shadow.querySelectorAll(selector)];
 
         $('[data-action="close"]')?.addEventListener('click', closeProjecture);
+        $('[data-action="close-compare"]')?.addEventListener('click', closeCompareView);
         $('[data-action="refresh"]')?.addEventListener('click', loadAllData);
         $('[data-action="undo"]')?.addEventListener('click', undoLastMove);
         $('[data-action="select-visible"]')?.addEventListener('click', selectVisible);
@@ -1831,6 +2710,61 @@
         $('[data-action="export-csv"]')?.addEventListener('click', exportCsv);
         $('[data-action="copy-ai-prompt"]')?.addEventListener('click', copyAiTriagePrompt);
         $('[data-action="import-ai-plan"]')?.addEventListener('click', importAiPlan);
+        $('[data-action="compare-selected"]')?.addEventListener('click', () => openCompareView([...state.selected]));
+        $('[data-action="save-new-multichat"]')?.addEventListener('click', () => saveCurrentMultiChat({ saveAs: true }));
+        $('[data-action="save-multichat"]')?.addEventListener('click', () => saveCurrentMultiChat());
+        $('[data-action="save-as-multichat"]')?.addEventListener('click', () => saveCurrentMultiChat({ saveAs: true }));
+        $('[data-action="delete-multichat"]')?.addEventListener('click', deleteCurrentMultiChat);
+        $$('[data-action="open-saved-multichat"]').forEach(button => button.addEventListener('click', () => {
+            const view = state.multiChats.views[button.dataset.viewId];
+            if (!view) return;
+            state.savedMultiChatsOpen = false;
+            openCompareView(view.chatIds, { savedViewId: view.id, scrollPositions: view.scrollPositions });
+        }));
+        $$('[data-action="move-compare-left"]').forEach(button => button.addEventListener('click', () => reorderCompareChat(button.dataset.chatId, -1)));
+        $$('[data-action="move-compare-right"]').forEach(button => button.addEventListener('click', () => reorderCompareChat(button.dataset.chatId, 1)));
+        $$('[data-action="remove-compare-pane"]').forEach(button => button.addEventListener('click', () => removeCompareChat(button.dataset.chatId)));
+        $$('[data-action="copy-conversation"]').forEach(button => button.addEventListener('click', () => copyConversation(button.dataset.chatId)));
+        $$('[data-action="copy-compare-message"]').forEach(button => button.addEventListener('click', async () => {
+            const message = state.compare.conversations.get(button.dataset.chatId)?.messages.find(item => item.id === button.dataset.messageId);
+            if (!message) return;
+            await copyText(message.text || `[${message.unsupported.join(', ') || 'Unsupported content'}]`);
+            setStatus('Copied message.', 'success');
+        }));
+        $$('[data-action="toggle-compare-message"]').forEach(button => button.addEventListener('click', () => {
+            const chatId = button.dataset.chatId;
+            state.compare.hiddenMessages[chatId] ||= {};
+            state.compare.hiddenMessages[chatId][button.dataset.messageId] = !state.compare.hiddenMessages[chatId][button.dataset.messageId];
+            render();
+        }));
+        $$('[data-compare-search]').forEach(input => input.addEventListener('input', event => {
+            state.compare.searches[input.dataset.compareSearch] = event.target.value;
+            const pos = event.target.selectionStart;
+            render();
+            const replacement = state.shadow.querySelector(`[data-compare-search="${CSS.escape(input.dataset.compareSearch)}"]`);
+            replacement?.focus();
+            try { replacement?.setSelectionRange(pos, pos); } catch { /* ignore */ }
+        }));
+        $('#syncCompareScroll')?.addEventListener('change', event => {
+            state.compare.syncScroll = event.target.checked;
+        });
+        $$('.compare-messages[data-chat-id]').forEach(pane => pane.addEventListener('scroll', () => {
+            const chatId = pane.dataset.chatId;
+            state.compare.scrollPositions[chatId] = Math.max(0, Math.round(pane.scrollTop));
+            if (state.compare.syncScroll && !state.compare.syncingScroll) {
+                const denominator = Math.max(1, pane.scrollHeight - pane.clientHeight);
+                const ratio = pane.scrollTop / denominator;
+                state.compare.syncingScroll = true;
+                $$('.compare-messages[data-chat-id]').forEach(other => {
+                    if (other === pane) return;
+                    other.scrollTop = ratio * Math.max(0, other.scrollHeight - other.clientHeight);
+                    state.compare.scrollPositions[other.dataset.chatId] = Math.max(0, Math.round(other.scrollTop));
+                });
+                setTimeout(() => { state.compare.syncingScroll = false; }, 0);
+            }
+            clearTimeout(compareScrollTimer);
+            compareScrollTimer = setTimeout(updateCompareSaveButtons, 180);
+        }, { passive: true }));
         $('[data-action="show-suggestions"]')?.addEventListener('click', () => {
             state.settings.view = 'suggested'; saveSettings(); closeDrawers(); render();
         });
@@ -1904,6 +2838,17 @@
         $('[data-action="toggle-insights"]')?.addEventListener('click', () => toggleDrawer('insightsPanel'));
         $('[data-action="toggle-favicons"]')?.addEventListener('click', () => toggleDrawer('faviconsPanel'));
         $('[data-action="toggle-settings"]')?.addEventListener('click', () => toggleDrawer('settingsPanel'));
+        $('[data-action="toggle-saved-multichats"]')?.addEventListener('click', () => {
+            const panel = state.shadow.getElementById('savedMultiChatsPanel');
+            const open = panel?.classList.contains('hidden');
+            closeDrawers();
+            state.savedMultiChatsOpen = !!open;
+            if (open) panel?.classList.remove('hidden');
+        });
+        $$('[data-action="drive-sync"]').forEach(button => button.addEventListener('click', event => {
+            if (event.shiftKey || !state.driveConfig?.enabled) configureGoogleDriveSync();
+            else syncWithGoogleDrive({ manual: true });
+        }));
         wireFaviconEvents();
         $$('[data-action="close-drawers"]').forEach(btn => btn.addEventListener('click', closeDrawers));
 
@@ -1939,6 +2884,7 @@
 
     function closeDrawers() {
         state.shadow?.querySelectorAll('.drawer').forEach(el => el.classList.add('hidden'));
+        state.savedMultiChatsOpen = false;
     }
 
     function showCardMenu(chatId, anchor) {
@@ -2041,6 +2987,7 @@
         ensureRoot();
         observer.observe(document.documentElement, { childList: true, subtree: true });
         startFaviconEngine();
+        if (state.driveConfig?.enabled) scheduleCloudSync(1800);
         log(`${APP} v${VERSION} loaded. Press Alt+Shift+O or click the floating ▦ button.`);
     }
 

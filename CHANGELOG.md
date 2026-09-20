@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0 - unreleased
+
+- Added a read-only Compare View for two to four selected conversations.
+- Added independently scrollable panes, optional synchronized scrolling, per-pane message search, message/whole-chat copy controls, hide/show controls, pane reordering/removal, and live-chat links.
+- Added graceful placeholders for unsupported rich content instead of attempting to reproduce every ChatGPT widget.
+- Added named saved multi-chats containing ordered chat IDs and per-pane scroll positions.
+- Added dirty-state-aware Save and Save As actions plus confirmed deletion and missing-chat handling.
+- Added Google Drive synchronization through a user-owned Google Apps Script bridge.
+- Added timestamped per-setting/per-record merge semantics, deletion tombstones, debounced automatic sync, startup/manual sync, and revision-conflict retries.
+- Kept column width, bridge credentials, selections, searches, loaded conversations, and tokens device-local.
+- Added Preview-isolated Drive credentials and portable-state storage.
+
 ## 1.1.3 - 2026-09-04
 
 - Moved Favicons and Insights beside the Projecture title, with Favicons first.

@@ -1,6 +1,6 @@
 # Projecture
 
-A Tampermonkey userscript for organizing ChatGPT Projects and chats with a visual board, drag-and-drop moves, search/filtering, local organization insights, bulk operations, custom per-Project/per-chat favicons, and import/export tooling.
+A Tampermonkey userscript for organizing and comparing ChatGPT conversations with a visual Project board, native chat moves, saved read-only multi-chat workspaces, Google Drive sync, custom favicons, and local organization insights.
 
 **Authorship:** Nathan Burgdorff + Ari (ChatGPT)
 
@@ -17,6 +17,9 @@ A Tampermonkey userscript for organizing ChatGPT Projects and chats with a visua
 - Per-Project custom favicons with per-chat overrides.
 - Master and per-rule favicon enable/disable controls.
 - Favicon management views for configured rules, all Projects, and all chats.
+- Read-only 2–4 chat Compare View with independent or synchronized scrolling, per-pane search, copy/hide controls, and live-chat links.
+- Named saved multi-chats with pane ordering and per-conversation scroll restoration.
+- Google Drive synchronization through a user-owned Apps Script bridge, with merge-safe records, deletion tombstones, and revision-conflict retries.
 - JSON/CSV organization export plus favicon import/export.
 - Migration from the earlier ChatGPT Project Organizer settings key.
 
@@ -36,7 +39,7 @@ Projecture supports an independently installed Preview channel for testing pull 
 2. Open ChatGPT normally to run the release copy.
 3. Add `#proj-preview` to a ChatGPT URL to run Preview instead; removing the hash returns to release. Projecture reloads the page when this selector changes so exactly one copy initializes.
 
-Every push outside the generated `preview` branch rebuilds that branch through `.github/workflows/preview-channel.yml`. The Preview userscript has its own name, namespace, monotonically increasing build version, update/download URLs, visible `[PREVIEW]` label, and local settings/favicon keys.
+Every push outside the generated `preview` branch rebuilds that branch through `.github/workflows/preview-channel.yml`. The Preview userscript has its own name, namespace, monotonically increasing build version, update/download URLs, visible `[PREVIEW]` label, and channel-isolated local state and Drive credentials.
 
 Preview and release therefore do not overwrite each other's browser-local configuration. They still operate on the same live ChatGPT account: moving a chat in Preview really moves it, and is not sandboxed test data.
 
@@ -44,15 +47,15 @@ Refreshing ChatGPT only reloads the userscript version already installed in the 
 
 ## Version
 
-Current release: **1.1.3**.
+Current development version: **1.2.0**. The release remains **1.1.3** until the v1.2 pull request is reviewed and merged.
 
 Version snapshots are retained in `versions/` as development continues.
 
 ## Architecture
 
-Projecture runs entirely in the browser. It reads the signed-in ChatGPT session and uses ChatGPT's own backend endpoints to enumerate Projects/chats and perform moves. UI state and favicon configuration are stored in channel-specific browser `localStorage`; the access token is retained only in memory for the current page session.
+Projecture runs entirely in the browser. It reads the signed-in ChatGPT session and uses ChatGPT's own backend endpoints to enumerate Projects/chats, retrieve conversations for read-only comparison, and perform moves. Local state uses channel-specific `localStorage`; optional cloud transport uses a user-owned Apps Script bridge. The ChatGPT access token is retained only in memory for the current page session.
 
-See `docs/Architecture.md`, `docs/DataModel.md`, and `docs/DevelopmentHistory.md`.
+See `docs/Architecture.md`, `docs/DataModel.md`, `docs/GoogleDriveSync.md`, and `docs/DevelopmentHistory.md`.
 
 Run the userscript regression checks with `node --test tests/Projecture.regression.test.js`.
 
