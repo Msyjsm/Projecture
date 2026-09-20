@@ -1,5 +1,5 @@
 Generated userscript preview. Do not edit this branch directly.
-Source branch: main
+Source branch: feature/multi-chat-drive-sync
 Source commit: 7d84addd8344c6ead0bcb04640d3bd65f23fae58
-Workflow run: 33918084199
+Workflow run: 35490302361
 Preview selector: #proj-preview
